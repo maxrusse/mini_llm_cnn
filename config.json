@@ -1,0 +1,36 @@
+{
+  "benchmark_repo_root": "../xray_fracture_benchmark",
+  "benchmark_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
+  "baseline_config": "configs/baseline.yaml",
+  "selection_metric": "dice_pos",
+  "default_tier": "medium",
+  "results_file": "results.tsv",
+  "state_file": ".mini_loop/state.json",
+  "generated_config_dir": "generated_configs",
+  "logs_dir": "logs",
+  "runs_dir": "runs",
+  "keep_improvement_epsilon": 1e-06,
+  "runtime_tiers": {
+    "smoke": {
+      "training": {
+        "epochs": 2,
+        "max_train_batches": 10,
+        "max_eval_batches": 5
+      }
+    },
+    "medium": {
+      "training": {
+        "epochs": 6,
+        "max_train_batches": 60,
+        "max_eval_batches": 20
+      }
+    },
+    "long": {
+      "training": {
+        "epochs": 12,
+        "max_train_batches": 120,
+        "max_eval_batches": 60
+      }
+    }
+  }
+}

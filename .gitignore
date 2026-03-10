@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.mini_loop/
+generated_configs/*
+!generated_configs/.gitkeep
+logs/*
+!logs/.gitkeep
+runs/*
+!runs/.gitkeep
+results.tsv
