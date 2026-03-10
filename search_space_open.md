@@ -6,6 +6,7 @@ Open search-space policy for `mini_llm_cnn` night runs.
 - Primary goal: improve validation `dice_pos`.
 - Compare only within the same runtime tier.
 - `test` stays locked until there is an explicit finalist selection.
+- Open search should use real GPU budgets, not sub-minute proxy runs.
 
 ## Fixed Contract
 - Training, validation, and test semantics come from `xray_fracture_benchmark`.
@@ -37,7 +38,8 @@ Open search-space policy for `mini_llm_cnn` night runs.
 - Expanding the repo arbitrarily without a clear link to the existing benchmark.
 
 ## Overnight Strategy
-- Fresh start per tier: baseline first, then broad `medium` search.
-- Use `long` only for candidates that are clearly better than baseline in `medium`.
+- Fresh start per tier: baseline first, then broad search across the 5m to 30m tiers.
+- Use `medium_5m`, `medium`, `medium_20m`, and `medium_30m` flexibly based on signal quality and experiment cost.
+- Use `long` only for candidates that are clearly better than baseline in the shorter search tiers and are worth up to about 2 hours of GPU time.
 - Express new ideas as small, reviewable config changes; avoid uncontrolled bundled jumps at the start.
 - If a strong parent already exists, continue searching from that parent; otherwise start from baseline.

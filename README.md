@@ -10,7 +10,8 @@ It is designed to be much simpler than `llm_driven_cnns`: the benchmark code sta
 - lets Codex choose one structured action per cycle while the local wrapper executes it
 - searches by changing YAML configs, not benchmark Python code
 - selects candidates by validation `dice_pos`
-- keeps `smoke`, `medium`, and `long` runtime tiers comparable
+- lets open search choose between real 5m, 10m, 20m, and 30m screening tiers
+- reserves `long` for finalist runs up to about 2 hours
 - supports unattended overnight search
 
 ## What It Does Not Do
@@ -30,6 +31,14 @@ From this repo root:
 ## Search Modes
 - `open`: broader, data-driven search inside the benchmark contract
 - `limited`: narrower, more conservative search
+
+## Runtime Tiers
+- `medium_5m`: short screening run, about 5 minutes
+- `medium`: default search tier, about 10 minutes
+- `medium_20m`: slower follow-up search tier, about 20 minutes
+- `medium_30m`: heavier search tier, about 30 minutes
+- `long`: finalist tier, up to about 2 hours
+- `smoke`: debug-only sanity tier
 
 Launchers:
 

@@ -287,7 +287,11 @@ def runtime_tier_name(args_tier: str, settings: dict[str, Any]) -> str:
 
 
 def apply_runtime_tier(config: dict[str, Any], settings: dict[str, Any], tier: str) -> dict[str, Any]:
-    overrides = settings["runtime_tiers"][tier]
+    tier_spec = settings["runtime_tiers"][tier]
+    if isinstance(tier_spec, dict) and isinstance(tier_spec.get("overrides"), dict):
+        overrides = tier_spec["overrides"]
+    else:
+        overrides = tier_spec
     return deep_merge(config, overrides)
 
 

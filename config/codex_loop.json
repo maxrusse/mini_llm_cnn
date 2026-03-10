@@ -6,6 +6,21 @@
   "skip_git_repo_check": false,
   "sandbox_mode": "workspace-write",
   "controller_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
+  "open_search_runtime_tiers": [
+    "medium_5m",
+    "medium",
+    "medium_20m",
+    "medium_30m",
+    "long"
+  ],
+  "limited_search_runtime_tiers": [
+    "medium",
+    "medium_20m",
+    "long"
+  ],
+  "finalize_runtime_tiers": [
+    "long"
+  ],
   "codex_home_dir": ".mini_loop/codex_home",
   "thread_id_file": ".mini_loop/codex_thread_id.txt",
   "session_state_file": ".mini_loop/codex_session.json",

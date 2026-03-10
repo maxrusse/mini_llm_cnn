@@ -76,6 +76,43 @@ def latest_results_summary(results_path: pathlib.Path, *, max_rows: int = 8) -> 
     return "\n".join(rows[-max_rows:])
 
 
+def list_allowed_runtime_tiers(loop_cfg: dict[str, Any], search_space: str, app_cfg: dict[str, Any]) -> list[str]:
+    key = "limited_search_runtime_tiers" if search_space == "limited" else "open_search_runtime_tiers"
+    configured = loop_cfg.get(key, [])
+    tiers: list[str] = []
+    if isinstance(configured, list):
+        for item in configured:
+            name = str(item).strip()
+            if name and name in app_cfg.get("runtime_tiers", {}):
+                tiers.append(name)
+    if tiers:
+        return tiers
+    return [str(app_cfg.get("default_tier", "medium"))]
+
+
+def runtime_tier_summary(app_cfg: dict[str, Any], allowed_tiers: list[str]) -> str:
+    lines: list[str] = []
+    tier_specs = app_cfg.get("runtime_tiers", {})
+    finalize_tier = "long"
+    for name in allowed_tiers:
+        spec = tier_specs.get(name, {})
+        approx = ""
+        finalize_only = False
+        if isinstance(spec, dict):
+            approx_raw = spec.get("approx_minutes")
+            if approx_raw is not None:
+                approx = f"~{approx_raw}m"
+            finalize_only = bool(spec.get("finalize_only", False))
+        extras: list[str] = []
+        if approx:
+            extras.append(approx)
+        if finalize_only or name == finalize_tier:
+            extras.append("finalize-only")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        lines.append(f"- {name}{suffix}")
+    return "\n".join(lines)
+
+
 def load_results_rows(results_path: pathlib.Path) -> list[dict[str, str]]:
     if not results_path.exists():
         return []
@@ -209,6 +246,7 @@ def build_action_schema() -> dict[str, Any]:
             "action",
             "rationale",
             "label",
+            "runtime_tier",
             "config_path",
             "config_yaml",
             "parent_experiment_id",
@@ -222,6 +260,7 @@ def build_action_schema() -> dict[str, Any]:
             "action": {"type": "string", "enum": list(ACTION_VALUES)},
             "rationale": {"type": "string"},
             "label": {"type": "string"},
+            "runtime_tier": {"type": "string"},
             "config_path": {"type": "string"},
             "config_yaml": {"type": "string"},
             "parent_experiment_id": {"type": "string"},
@@ -254,6 +293,7 @@ def coerce_action(raw_action: Any) -> dict[str, Any]:
         "action": action,
         "rationale": " ".join(str(raw.get("rationale", "")).strip().split())[:1200],
         "label": slugify(str(raw.get("label", "")).strip())[:80],
+        "runtime_tier": str(raw.get("runtime_tier", "")).strip(),
         "config_path": str(raw.get("config_path", "")).strip(),
         "config_yaml": str(raw.get("config_yaml", "")),
         "parent_experiment_id": str(raw.get("parent_experiment_id", "")).strip(),
@@ -270,6 +310,8 @@ def validate_action(action: dict[str, Any]) -> list[str]:
     if len(str(action.get("rationale", ""))) < 20:
         issues.append("rationale_too_short")
     kind = str(action.get("action", ""))
+    if kind in {"baseline", "run_config"} and not str(action.get("runtime_tier", "")).strip():
+        issues.append("missing_runtime_tier")
     if kind == "run_config":
         if not str(action.get("config_path", "")).strip():
             issues.append("missing_config_path")
@@ -327,6 +369,7 @@ def build_initial_prompt(
     deadline_utc: str,
     search_space_name: str,
     search_space_text: str,
+    runtime_tier_text: str,
     baseline_config_path: pathlib.Path,
     baseline_config_text: str,
     status_output: str,
@@ -374,6 +417,14 @@ Available wrapper actions:
 Search-space policy:
 {search_space_text}
 
+Runtime tiers available for this search:
+{runtime_tier_text}
+
+Budget rule:
+- In open search, active exploration should use the 5m to 30m tiers.
+- Use long only to finalize clearly strong candidates.
+- Compare only against runs from the same runtime tier.
+
 Current status output:
 {status_output}
 
@@ -395,9 +446,11 @@ Output requirements:
 - For run_config, provide:
   - action="run_config"
   - label
+  - runtime_tier
   - config_path like generated_configs/<slug>.yaml
   - full config_yaml content
   - optional parent_experiment_id
+- For baseline, provide runtime_tier for the tier you want to establish.
 - For install_package, provide packages as a JSON array.
 - For download_file, provide download_url and download_path under downloads/.
 - Use notes for a short expected outcome or blocker description.
@@ -411,6 +464,7 @@ def build_resume_prompt(
     tier: str,
     deadline_utc: str,
     search_space_name: str,
+    runtime_tier_text: str,
     status_output: str,
     results_tail: str,
     best_context: dict[str, str],
@@ -437,6 +491,14 @@ Hard deadline UTC: {deadline_utc}
 Search-space mode: {search_space_name}
 
 You still must not execute shell commands directly. Return exactly one JSON action for the wrapper to execute.
+
+Runtime tiers available for this search:
+{runtime_tier_text}
+
+Budget rule:
+- Use the 5m to 30m tiers for active search.
+- Use long only to finalize clearly strong candidates.
+- Compare only within the same runtime tier.
 
 Previous cycle summary:
 {previous_cycle_summary or "(none)"}
@@ -652,16 +714,20 @@ def execute_wrapper_action(
     *,
     action: dict[str, Any],
     repo_root: pathlib.Path,
+    app_cfg: dict[str, Any],
     benchmark_repo_root: pathlib.Path,
     benchmark_python: pathlib.Path,
     controller_python: pathlib.Path,
-    tier: str,
+    default_tier: str,
     cycle_index: int,
     logs_dir: pathlib.Path,
 ) -> dict[str, Any]:
     kind = str(action["action"])
     run_loop_path = repo_root / "run_loop.py"
     cycle_slug = f"cycle_{cycle_index:04d}_{kind}"
+    selected_tier = str(action.get("runtime_tier", "")).strip() or default_tier
+    if kind in {"baseline", "run_config"} and selected_tier not in app_cfg.get("runtime_tiers", {}):
+        raise RuntimeError(f"unknown runtime_tier requested by agent: {selected_tier}")
 
     if kind == "done":
         return {
@@ -682,10 +748,10 @@ def execute_wrapper_action(
             str(run_loop_path),
             "baseline",
             "--tier",
-            tier,
+            selected_tier,
         ]
         outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
-        outcome.update({"status": "executed", "action": kind, "command": command})
+        outcome.update({"status": "executed", "action": kind, "command": command, "runtime_tier": selected_tier})
         return outcome
 
     if kind == "run_config":
@@ -702,7 +768,7 @@ def execute_wrapper_action(
             "--config",
             str(config_path),
             "--tier",
-            tier,
+            selected_tier,
             "--label",
             label,
         ]
@@ -717,6 +783,7 @@ def execute_wrapper_action(
                 "action": kind,
                 "command": command,
                 "config_path": str(config_path),
+                "runtime_tier": selected_tier,
             }
         )
         return outcome
@@ -823,6 +890,8 @@ def main() -> int:
     session_log = logs_dir / f"codex_loop_{args.tier}_{session_stamp}.log"
 
     metric_key = str(app_cfg["selection_metric"])
+    allowed_runtime_tiers = list_allowed_runtime_tiers(loop_cfg, args.search_space, app_cfg)
+    runtime_tier_text = runtime_tier_summary(app_cfg, allowed_runtime_tiers)
     baseline_config_path = benchmark_baseline_config_path(repo_root, app_cfg, benchmark_repo_root)
     baseline_config_text = read_text_limited(baseline_config_path, max_chars=12000)
     search_space_text = read_text_limited(search_space_doc, max_chars=8000)
@@ -840,6 +909,7 @@ def main() -> int:
         "tier": args.tier,
         "search_space": args.search_space,
         "search_space_doc": str(search_space_doc),
+        "allowed_runtime_tiers": allowed_runtime_tiers,
         "model": str(loop_cfg["model"]),
         "reasoning_effort": str(loop_cfg["reasoning_effort"]),
         "web_search_mode": str(loop_cfg["web_search_mode"]),
@@ -861,6 +931,7 @@ def main() -> int:
         deadline_utc=deadline_utc,
         search_space_name=args.search_space,
         search_space_text=search_space_text,
+        runtime_tier_text=runtime_tier_text,
         baseline_config_path=baseline_config_path,
         baseline_config_text=baseline_config_text,
         status_output=status_output,
@@ -925,10 +996,11 @@ def main() -> int:
                     execution = execute_wrapper_action(
                         action=action,
                         repo_root=repo_root,
+                        app_cfg=app_cfg,
                         benchmark_repo_root=benchmark_repo_root,
                         benchmark_python=benchmark_python,
                         controller_python=controller_python,
-                        tier=args.tier,
+                        default_tier=args.tier,
                         cycle_index=cycle,
                         logs_dir=logs_dir,
                     )
@@ -1004,6 +1076,7 @@ def main() -> int:
             tier=args.tier,
             deadline_utc=deadline_utc,
             search_space_name=args.search_space,
+            runtime_tier_text=runtime_tier_text,
             status_output=status_output,
             results_tail=latest_results_summary(results_path),
             best_context=best_context,

@@ -27,8 +27,11 @@ This repo is an autonomous config-only research loop for `xray_fracture_benchmar
 Get the highest validation `dice_pos` within a fixed runtime tier while keeping changes simple and reviewable.
 
 ## Operating rules
-- Baseline first for each tier.
+- Baseline first for each runtime tier you want to use.
 - Compare only against the current best run in the same tier.
+- In `open` mode, use the real search tiers flexibly:
+  - `medium_5m`, `medium`, `medium_20m`, `medium_30m` for active exploration
+  - `long` only for clear finalist candidates
 - Prefer config changes that are understandable and tied to evidence from prior results.
 - Keep candidate configs small and specific. Avoid giant bundles unless simpler changes are exhausted.
 - Use `test` only for explicit finalist evaluation after validation success.
@@ -36,6 +39,6 @@ Get the highest validation `dice_pos` within a fixed runtime tier while keeping 
 ## Loop
 1. Inspect the wrapper-provided status, result tail, and best-config context.
 2. Return exactly one JSON action.
-3. If baseline is missing for the tier, choose `baseline`.
-4. Otherwise choose a small `run_config` candidate, or request `install_package` / `download_file` only when directly justified.
+3. If baseline is missing for the runtime tier you want to use, choose `baseline` for that tier.
+4. Otherwise choose a small `run_config` candidate and set its `runtime_tier`, or request `install_package` / `download_file` only when directly justified.
 5. Review the next cycle's result summary and continue until manually stopped.

@@ -12,24 +12,64 @@
   "keep_improvement_epsilon": 1e-06,
   "runtime_tiers": {
     "smoke": {
-      "training": {
-        "epochs": 2,
-        "max_train_batches": 10,
-        "max_eval_batches": 5
+      "approx_minutes": 1,
+      "overrides": {
+        "training": {
+          "epochs": 2,
+          "max_train_batches": 10,
+          "max_eval_batches": 5
+        }
+      }
+    },
+    "medium_5m": {
+      "approx_minutes": 5,
+      "overrides": {
+        "training": {
+          "epochs": 9,
+          "max_train_batches": 330,
+          "max_eval_batches": 40
+        }
       }
     },
     "medium": {
-      "training": {
-        "epochs": 6,
-        "max_train_batches": 60,
-        "max_eval_batches": 20
+      "approx_minutes": 10,
+      "overrides": {
+        "training": {
+          "epochs": 10,
+          "max_train_batches": 600,
+          "max_eval_batches": 60
+        }
+      }
+    },
+    "medium_20m": {
+      "approx_minutes": 20,
+      "overrides": {
+        "training": {
+          "epochs": 12,
+          "max_train_batches": 1100,
+          "max_eval_batches": 80
+        }
+      }
+    },
+    "medium_30m": {
+      "approx_minutes": 30,
+      "overrides": {
+        "training": {
+          "epochs": 16,
+          "max_train_batches": 1200,
+          "max_eval_batches": 100
+        }
       }
     },
     "long": {
-      "training": {
-        "epochs": 12,
-        "max_train_batches": 120,
-        "max_eval_batches": 60
+      "approx_minutes": 120,
+      "finalize_only": true,
+      "overrides": {
+        "training": {
+          "epochs": 24,
+          "max_train_batches": 3000,
+          "max_eval_batches": 160
+        }
       }
     }
   }
