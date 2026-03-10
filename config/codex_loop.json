@@ -1,0 +1,15 @@
+{
+  "model": "gpt-5.4",
+  "reasoning_effort": "high",
+  "web_search_mode": "live",
+  "network_access_enabled": true,
+  "skip_git_repo_check": false,
+  "sandbox_mode": "workspace-write",
+  "controller_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
+  "codex_home_dir": ".mini_loop/codex_home",
+  "thread_id_file": ".mini_loop/codex_thread_id.txt",
+  "session_state_file": ".mini_loop/codex_session.json",
+  "stop_flag_file": ".mini_loop/STOP_CODEX_LOOP",
+  "cycle_pause_seconds": 5,
+  "max_cycles": 1000
+}

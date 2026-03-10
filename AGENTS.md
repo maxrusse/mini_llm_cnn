@@ -3,7 +3,7 @@
 ## Mission and Scope
 - Build a minimal autonomous research loop for `xray_fracture_benchmark`.
 - Optimize validation `dice_pos` through config-only experimentation.
-- Keep the mini loop lightweight, reproducible, and easy for an LLM agent to operate.
+- Keep the mini loop lightweight, reproducible, and easy for a single Codex agent to operate.
 
 ## Hard Constraints and Safety Boundaries
 - Do not edit code inside `../xray_fracture_benchmark/src` or `../xray_fracture_benchmark/scripts`.
@@ -11,6 +11,7 @@
 - Treat the benchmark repo as the source of truth for data splits, metric definitions, and train/validate/test semantics.
 - Use explicit interpreter and repo paths from `config.json`; do not rely on shell activation state.
 - Keep experiment outputs local to this repo.
+- The search logic belongs to the Codex agent, while the local wrapper executes the chosen action.
 - If interactive agent work is needed overnight, web research is allowed for benchmark-relevant ideas, but downloaded datasets, labels, or alternate test data are not.
 - Targeted package installs into `xray_fracture_benchmark_venv` are allowed only when they are necessary for a concrete supported experiment direction and are logged in the session summary.
 - Downloading pretrained weights or papers is allowed; downloading new training datasets is out of scope.
@@ -26,11 +27,13 @@
 - Log every attempted experiment to `results.tsv`.
 - Each run must preserve its generated config, logs, checkpoint path, and validation metrics path.
 - If the loop behavior or CLI changes, update `README.md` and `program.md`.
+- Keep Codex loop state minimal: one repo-local `CODEX_HOME`, one thread id file, one session state file, and log files.
 
 ## Operational Commands
+- Login Codex for this repo: `& .\scripts\login_codex.ps1`
+- Start single-agent Codex loop: `& .\scripts\start_codex_loop.ps1 -Tier medium -Hours 8 -SearchSpace open -StartInNewWindow`
+- Stop after the current cycle: `New-Item -ItemType File -Path .\.mini_loop\STOP_CODEX_LOOP -Force | Out-Null`
 - Baseline: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py baseline --tier smoke`
-- Auto step: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py step --tier medium`
-- Night run: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py night-run --tier medium --hours 8`
 - Run explicit config: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py run-config --config .\generated_configs\custom.yaml --tier medium --label custom_try`
 - Status: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py status`
 - Locked test on finalist: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py test --experiment-id e0007`

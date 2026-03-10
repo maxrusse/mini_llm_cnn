@@ -7,4 +7,6 @@ logs/*
 !logs/.gitkeep
 runs/*
 !runs/.gitkeep
+downloads/*
+!downloads/.gitkeep
 results.tsv
