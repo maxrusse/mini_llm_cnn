@@ -28,6 +28,14 @@ Open search-space policy for `mini_llm_cnn` night runs.
   - width or capacity changes
   - input-size and aspect-handling changes
   - sampling or scheduler pivots
+- Open mode may also test original method ideas through tightly scoped `src/` code edits when config-only search is too limiting.
+- Valid code-edit directions include loss refinements, sampling logic improvements, architectural tweaks, better heads, or mathematically motivated training changes that stay within the benchmark contract.
+- Open mode may use a small coherent bundle of changes when that is the fastest way to test a real hypothesis. It is not restricted to exactly one knob at a time.
+- Good bundles are centered on one idea:
+  - architecture family + backbone + matching batch-size change
+  - patch enable + patch size + hard-negative settings
+  - dual-head model + presence loss + presence evaluation settings
+- Bad bundles are unfocused mixes across unrelated axes.
 
 ## Data-Driven Rule
 - Every new direction should have a data-driven reason: baseline outcome, repeated failure pattern, observed weakness, or external evidence from papers or web search.
@@ -36,6 +44,7 @@ Open search-space policy for `mini_llm_cnn` night runs.
 - Added complexity must be justified by evidence. More heads, more sampling logic, or more structure only when results support it.
 - Open search should mix breadth and depth: first establish a reasonable spread of architectures and training regimes, then exploit the strongest basin.
 - Before moving to `long`, there should usually be evidence that more than one architecture or model direction was considered, unless the benchmark support makes that impossible.
+- If a method idea needs code, keep the code change narrow enough that it can still be attributed and reverted if the run is worse.
 
 ## Allowed External Help
 - Web search for benchmark-relevant architecture, sampling, loss, optimization, or training ideas.
@@ -54,5 +63,6 @@ Open search-space policy for `mini_llm_cnn` night runs.
 - Use `medium_5m`, `medium`, `medium_20m`, and `medium_30m` flexibly based on signal quality and experiment cost.
 - Use `long` only for candidates that are clearly better than baseline in the shorter search tiers and are worth up to about 2 hours of GPU time.
 - Express new ideas as small, reviewable config changes; avoid uncontrolled bundled jumps at the start.
+- In open mode, if a single-change search is clearly too slow, use a compact hypothesis-driven bundle instead of inching forward one scalar at a time.
 - If a strong parent already exists, continue searching from that parent; otherwise start from baseline.
 - Do not underuse the GPU. In open mode, it is acceptable to spend real budget on stronger architectures, pretrained backbones, larger inputs, and other heavier but benchmark-compatible variants when they have a concrete rationale.

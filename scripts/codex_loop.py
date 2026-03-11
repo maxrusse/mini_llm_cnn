@@ -27,6 +27,8 @@ ACTION_VALUES: tuple[str, ...] = (
     "blocked",
 )
 
+CODE_EDIT_FIELDS: tuple[str, str] = ("path", "content")
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -254,6 +256,7 @@ def build_action_schema() -> dict[str, Any]:
             "packages",
             "download_url",
             "download_path",
+            "code_edits",
             "notes",
         ],
         "properties": {
@@ -272,6 +275,19 @@ def build_action_schema() -> dict[str, Any]:
             },
             "download_url": {"type": "string"},
             "download_path": {"type": "string"},
+            "code_edits": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path", "content"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
             "notes": {"type": "string"},
         },
     }
@@ -289,6 +305,16 @@ def coerce_action(raw_action: Any) -> dict[str, Any]:
             token = str(item).strip()
             if token:
                 packages.append(token)
+    code_edits_raw = raw.get("code_edits", [])
+    code_edits: list[dict[str, str]] = []
+    if isinstance(code_edits_raw, list):
+        for item in code_edits_raw[:4]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "")).strip()
+            content = str(item.get("content", ""))
+            if path:
+                code_edits.append({"path": path, "content": content})
     return {
         "action": action,
         "rationale": " ".join(str(raw.get("rationale", "")).strip().split())[:1200],
@@ -301,6 +327,7 @@ def coerce_action(raw_action: Any) -> dict[str, Any]:
         "packages": packages,
         "download_url": str(raw.get("download_url", "")).strip(),
         "download_path": str(raw.get("download_path", "")).strip(),
+        "code_edits": code_edits,
         "notes": " ".join(str(raw.get("notes", "")).strip().split())[:1200],
     }
 
@@ -319,6 +346,8 @@ def validate_action(action: dict[str, Any]) -> list[str]:
             issues.append("missing_config_yaml")
         if not str(action.get("label", "")).strip():
             issues.append("missing_label")
+        if action.get("code_edits") and not isinstance(action.get("code_edits"), list):
+            issues.append("invalid_code_edits")
     elif kind == "test":
         if not str(action.get("experiment_id", "")).strip():
             issues.append("missing_experiment_id")
@@ -346,6 +375,20 @@ def normalize_generated_config_path(repo_root: pathlib.Path, raw_path: str) -> p
         raise ValueError("config_path must stay under generated_configs/")
     if resolved.suffix.lower() not in {".yaml", ".yml"}:
         raise ValueError("config_path must end in .yaml or .yml")
+    return resolved
+
+
+def normalize_benchmark_code_path(benchmark_repo_root: pathlib.Path, raw_path: str) -> pathlib.Path:
+    candidate = pathlib.Path(str(raw_path).strip())
+    if candidate.is_absolute():
+        raise ValueError("code_edit path must be benchmark-repo-relative")
+    resolved = (benchmark_repo_root / candidate).resolve()
+    src_root = (benchmark_repo_root / "src").resolve()
+    if src_root not in resolved.parents and resolved != src_root:
+        raise ValueError("code_edit path must stay under benchmark src/")
+    suffix = resolved.suffix.lower()
+    if suffix not in {".py", ".pyi"}:
+        raise ValueError("code_edit path must target a Python source file")
     return resolved
 
 
@@ -401,13 +444,16 @@ Instead, return exactly one JSON action. The wrapper will execute it and resume 
 Hard rules:
 - Optimize validation dice_pos only.
 - Do not tune on test.
-- Do not edit code in ../xray_fracture_benchmark/src or ../xray_fracture_benchmark/scripts.
+- Do not edit code in ../xray_fracture_benchmark/scripts.
 - Do not change datasets, labels, manifests, or split definitions.
 - Stay within the selected runtime tier.
+- In limited mode, stay config-only.
+- In open mode, if existing benchmark methods look exhausted, you may propose benchmark src/ code edits through run_config.code_edits.
+- Open-mode code edits must stay under ../xray_fracture_benchmark/src, be tightly scoped, and be paired with a concrete config experiment.
 
 Available wrapper actions:
 - baseline: run run_loop.py baseline --tier {tier}
-- run_config: write one YAML file under generated_configs/ and run it with run_loop.py run-config --tier {tier}
+- run_config: write one YAML file under generated_configs/, optionally apply a small set of benchmark src/ code edits, and run it with run_loop.py run-config --tier {tier}
 - test: run locked test for a finalist experiment id
 - install_package: install one or more narrowly scoped packages into the benchmark venv
 - download_file: download a file into downloads/
@@ -427,8 +473,12 @@ Budget rule:
 - Compare only against runs from the same runtime tier.
 - Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
 - In open search, architecture and model-family changes are expected exploration axes, not optional extras.
+- In open search, own method ideas are allowed. You may propose small code or math changes inside benchmark src/ when they are data-driven and clearly tied to a hypothesis.
 - Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
 - Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
+- In limited search, prefer one controlled change at a time.
+- In open search, you may propose a compact 2-4 change bundle when it is one coherent hypothesis and clearly faster than scalar-only local search.
+- If you bundle changes, keep them centered on one idea such as architecture + backbone + batch fit, or patch enable + patch settings, not a random grab bag.
 
 Current status output:
 {status_output}
@@ -458,12 +508,15 @@ Output requirements:
   - config_path like generated_configs/<slug>.yaml
   - full config_yaml content
   - optional parent_experiment_id
+  - optional code_edits as an array of benchmark-repo-relative src/ files with full file content
 - For baseline, provide runtime_tier for the tier you want to establish.
 - For install_package, provide packages as a JSON array.
 - For download_file, provide download_url and download_path under downloads/.
 - Use notes for a short expected outcome or blocker description.
 - Keep changes small and data-driven.
 - In open search, do not complete a whole overnight run without using web search.
+- In open search, a compact hypothesis-driven bundle is allowed when it accelerates exploration.
+- If you use code_edits, keep them tightly scoped and tied to one concrete method hypothesis.
 """
 
 
@@ -511,8 +564,13 @@ Budget rule:
 - Compare only within the same runtime tier.
 - Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
 - In open search, architecture and model-family changes are expected exploration axes, not optional extras.
+- In open search, own method ideas are allowed. You may propose small code or math changes inside benchmark src/ when they are data-driven and clearly tied to a hypothesis.
 - Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
 - Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
+- In limited search, prefer one controlled change at a time.
+- In open search, you may propose a compact 2-4 change bundle when it is one coherent hypothesis and clearly faster than scalar-only local search.
+- If you bundle changes, keep them centered on one idea such as architecture + backbone + batch fit, or patch enable + patch settings, not a random grab bag.
+- If you use code_edits, keep them tightly scoped and pair them with a concrete config run.
 
 Previous cycle summary:
 {previous_cycle_summary or "(none)"}
@@ -736,6 +794,7 @@ def execute_wrapper_action(
     benchmark_python: pathlib.Path,
     controller_python: pathlib.Path,
     default_tier: str,
+    search_space_name: str,
     cycle_index: int,
     logs_dir: pathlib.Path,
 ) -> dict[str, Any]:
@@ -776,6 +835,9 @@ def execute_wrapper_action(
         config_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_text = str(action["config_yaml"]).rstrip() + "\n"
         config_path.write_text(yaml_text, encoding="utf-8")
+        code_edits = action.get("code_edits", [])
+        if code_edits and search_space_name != "open":
+            raise RuntimeError("code_edits are allowed only in open search")
 
         label = str(action.get("label", "")).strip() or "candidate"
         command = [
@@ -793,7 +855,43 @@ def execute_wrapper_action(
         if parent_experiment_id:
             command.extend(["--parent-experiment-id", parent_experiment_id])
         log_path = logs_dir / f"{cycle_slug}_{label}.log"
-        outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
+        backups: list[tuple[pathlib.Path, bool, str]] = []
+        edited_paths: list[str] = []
+        if code_edits:
+            selection_metric = str(app_cfg["selection_metric"])
+            results = load_results_rows(resolve_repo_path(repo_root, str(app_cfg["results_file"])))
+            best_row = current_best_result(results, selected_tier, selection_metric)
+            current_best_id = str(best_row.get("experiment_id", "")).strip() if best_row else ""
+            if current_best_id and parent_experiment_id and parent_experiment_id != current_best_id:
+                raise RuntimeError("code_edits currently require parent_experiment_id to match the current kept best for that tier")
+            for edit in code_edits:
+                target_path = normalize_benchmark_code_path(benchmark_repo_root, str(edit.get("path", "")))
+                existed = target_path.exists()
+                original_text = target_path.read_text(encoding="utf-8") if existed else ""
+                backups.append((target_path, existed, original_text))
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(str(edit.get("content", "")), encoding="utf-8")
+                edited_paths.append(rel_or_abs(target_path, benchmark_repo_root))
+        try:
+            outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
+        except Exception:
+            for target_path, existed, original_text in reversed(backups):
+                if existed:
+                    target_path.write_text(original_text, encoding="utf-8")
+                elif target_path.exists():
+                    target_path.unlink()
+            raise
+        if backups:
+            results_after = load_results_rows(resolve_repo_path(repo_root, str(app_cfg["results_file"])))
+            latest_row = results_after[-1] if results_after else {}
+            latest_status = str(latest_row.get("status", "")).strip().lower()
+            keep_code = latest_status in {"keep", "baseline"}
+            if not keep_code:
+                for target_path, existed, original_text in reversed(backups):
+                    if existed:
+                        target_path.write_text(original_text, encoding="utf-8")
+                    elif target_path.exists():
+                        target_path.unlink()
         outcome.update(
             {
                 "status": "executed",
@@ -801,6 +899,8 @@ def execute_wrapper_action(
                 "command": command,
                 "config_path": str(config_path),
                 "runtime_tier": selected_tier,
+                "code_edit_paths": edited_paths,
+                "code_edit_retained": bool(backups) and latest_status in {"keep", "baseline"} if backups else False,
             }
         )
         return outcome
@@ -1018,6 +1118,7 @@ def main() -> int:
                         benchmark_python=benchmark_python,
                         controller_python=controller_python,
                         default_tier=args.tier,
+                        search_space_name=args.search_space,
                         cycle_index=cycle,
                         logs_dir=logs_dir,
                     )

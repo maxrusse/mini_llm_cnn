@@ -2,21 +2,23 @@
 
 `mini_llm_cnn` is a small single-agent Codex research loop for `xray_fracture_benchmark`.
 
-It is designed to be much simpler than `llm_driven_cnns`: the benchmark code stays fixed, a single Codex agent owns the search policy, and all search state stays local to this repo.
+It is designed to be much simpler than `llm_driven_cnns`: a single Codex agent owns the search policy, the wrapper executes the chosen action, and all search state stays local to this repo.
 
 ## What It Does
 - reuses the prepared benchmark environment and dataset by explicit path
 - uses a resumed `codex exec` session as the search agent
 - lets Codex choose one structured action per cycle while the local wrapper executes it
-- searches by changing YAML configs, not benchmark Python code
+- primarily searches by changing YAML configs
+- can also test tightly scoped benchmark `src/` code ideas in `open` mode
 - selects candidates by validation `dice_pos`
 - lets open search choose between real 5m, 10m, 20m, and 30m screening tiers
 - expects open search to actually use web search for outside ideas
+- lets open search use a small coherent bundle of changes when that is faster than one-scalar-at-a-time search
 - reserves `long` for finalist runs up to about 2 hours
 - supports unattended overnight search
 
 ## What It Does Not Do
-- it does not edit benchmark training code
+- it does not edit benchmark runner scripts automatically or arbitrarily
 - it does not tune on `test`
 - it does not change dataset splits or evaluation semantics
 - it does not pull in new datasets
@@ -65,7 +67,7 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - `logs/`: train/validate/test logs
 - `runs/`: checkpoints and metrics
 - `results.tsv`: experiment ledger, created on first run
-- `experiment_summary.tsv`: compact per-experiment model and hyperparameter summary
+- `experiment_summary.tsv`: compact per-experiment model, architecture, augmentation, sampling, and hyperparameter summary
 - `.mini_loop/state.json`: local loop state, created on first run
 - `.mini_loop/codex_home/`: repo-local Codex login state
 - `.mini_loop/codex_session.json`: current Codex loop session state

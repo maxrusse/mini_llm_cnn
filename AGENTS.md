@@ -2,11 +2,15 @@
 
 ## Mission and Scope
 - Build a minimal autonomous research loop for `xray_fracture_benchmark`.
-- Optimize validation `dice_pos` through config-only experimentation.
+- Optimize validation `dice_pos` through config-first experimentation, with optional open-mode method/code experiments when config-only search looks too narrow.
 - Keep the mini loop lightweight, reproducible, and easy for a single Codex agent to operate.
 
 ## Hard Constraints and Safety Boundaries
-- Do not edit code inside `../xray_fracture_benchmark/src` or `../xray_fracture_benchmark/scripts`.
+- Do not edit code inside `../xray_fracture_benchmark/scripts`.
+- In `limited` mode, stay config-only.
+- In `open` mode, tightly scoped code edits under `../xray_fracture_benchmark/src` are allowed only through the wrapper-owned `run_config.code_edits` path.
+- Code edits must stay data-driven, tied to one concrete hypothesis, and paired with a real config run.
+- The wrapper currently supports hill-climbing code edits on top of the current kept best for a tier; do not assume arbitrary branching between old code states.
 - Do not tune on `test`; locked test evaluation is explicit and finalist-only.
 - Treat the benchmark repo as the source of truth for data splits, metric definitions, and train/validate/test semantics.
 - Use explicit interpreter and repo paths from `config.json`; do not rely on shell activation state.
