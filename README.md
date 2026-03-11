@@ -11,6 +11,7 @@ It is designed to be much simpler than `llm_driven_cnns`: the benchmark code sta
 - searches by changing YAML configs, not benchmark Python code
 - selects candidates by validation `dice_pos`
 - lets open search choose between real 5m, 10m, 20m, and 30m screening tiers
+- expects open search to actually use web search for outside ideas
 - reserves `long` for finalist runs up to about 2 hours
 - supports unattended overnight search
 
@@ -64,6 +65,7 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - `logs/`: train/validate/test logs
 - `runs/`: checkpoints and metrics
 - `results.tsv`: experiment ledger, created on first run
+- `experiment_summary.tsv`: compact per-experiment model and hyperparameter summary
 - `.mini_loop/state.json`: local loop state, created on first run
 - `.mini_loop/codex_home/`: repo-local Codex login state
 - `.mini_loop/codex_session.json`: current Codex loop session state

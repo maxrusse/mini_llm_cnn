@@ -36,6 +36,33 @@ RESULT_FIELDS = [
     "total_seconds",
     "notes",
 ]
+SUMMARY_FIELDS = [
+    "experiment_id",
+    "parent_experiment_id",
+    "status",
+    "runtime_tier",
+    "val_metric_key",
+    "val_metric_value",
+    "train_seconds",
+    "total_seconds",
+    "model_name",
+    "model_backbone",
+    "model_base_channels",
+    "input_image_size",
+    "input_preserve_aspect",
+    "batch_size",
+    "epochs",
+    "learning_rate",
+    "weight_decay",
+    "scheduler",
+    "loss_name",
+    "bce_weight",
+    "dice_weight",
+    "presence_bce_weight",
+    "config_path",
+    "resolved_config_path",
+    "notes",
+]
 KEEP_STATUSES = {"baseline", "keep"}
 
 
@@ -158,6 +185,7 @@ def ensure_settings_paths(settings: dict[str, Any]) -> dict[str, pathlib.Path]:
         "benchmark_repo_root": resolve_from_repo(str(settings["benchmark_repo_root"])),
         "benchmark_python_exe": resolve_from_repo(str(settings["benchmark_python_exe"])),
         "results_file": resolve_from_repo(str(settings.get("results_file", "results.tsv"))),
+        "summary_file": resolve_from_repo(str(settings.get("summary_file", "experiment_summary.tsv"))),
         "state_file": resolve_from_repo(str(settings.get("state_file", ".mini_loop/state.json"))),
         "generated_config_dir": resolve_from_repo(str(settings.get("generated_config_dir", "generated_configs"))),
         "logs_dir": resolve_from_repo(str(settings.get("logs_dir", "logs"))),
@@ -217,6 +245,83 @@ def append_result(path: pathlib.Path, row: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=RESULT_FIELDS, delimiter="\t")
         writer.writerow(cooked)
+
+
+def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:
+    current: Any = mapping
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def extract_summary_row(result_row: dict[str, str], resolved_config: dict[str, Any] | None) -> dict[str, str]:
+    cfg = resolved_config if isinstance(resolved_config, dict) else {}
+    model_name = _stringify(_nested_get(cfg, "model", "name"))
+    model_backbone = _stringify(
+        _nested_get(cfg, "model", "backbone")
+        or _nested_get(cfg, "model", "encoder_name")
+        or _nested_get(cfg, "model", "backbone_name")
+    )
+    scheduler = _stringify(
+        _nested_get(cfg, "training", "scheduler")
+        or _nested_get(cfg, "scheduler", "name")
+        or _nested_get(cfg, "training", "scheduler_name")
+    )
+    return {
+        "experiment_id": _stringify(result_row.get("experiment_id")),
+        "parent_experiment_id": _stringify(result_row.get("parent_experiment_id")),
+        "status": _stringify(result_row.get("status")),
+        "runtime_tier": _stringify(result_row.get("runtime_tier")),
+        "val_metric_key": _stringify(result_row.get("val_metric_key")),
+        "val_metric_value": _stringify(result_row.get("val_metric_value")),
+        "train_seconds": _stringify(result_row.get("train_seconds")),
+        "total_seconds": _stringify(result_row.get("total_seconds")),
+        "model_name": model_name,
+        "model_backbone": model_backbone,
+        "model_base_channels": _stringify(_nested_get(cfg, "model", "base_channels")),
+        "input_image_size": _stringify(_nested_get(cfg, "input", "image_size")),
+        "input_preserve_aspect": _stringify(_nested_get(cfg, "input", "preserve_aspect")),
+        "batch_size": _stringify(_nested_get(cfg, "training", "batch_size")),
+        "epochs": _stringify(_nested_get(cfg, "training", "epochs")),
+        "learning_rate": _stringify(_nested_get(cfg, "training", "learning_rate")),
+        "weight_decay": _stringify(_nested_get(cfg, "training", "weight_decay")),
+        "scheduler": scheduler,
+        "loss_name": _stringify(_nested_get(cfg, "loss", "name")),
+        "bce_weight": _stringify(_nested_get(cfg, "loss", "bce_weight")),
+        "dice_weight": _stringify(_nested_get(cfg, "loss", "dice_weight")),
+        "presence_bce_weight": _stringify(_nested_get(cfg, "loss", "presence_bce_weight")),
+        "config_path": _stringify(result_row.get("config_path")),
+        "resolved_config_path": _stringify(result_row.get("resolved_config_path")),
+        "notes": _stringify(result_row.get("notes")),
+    }
+
+
+def refresh_experiment_summary(paths: dict[str, pathlib.Path]) -> None:
+    results = read_results(paths["results_file"])
+    summary_path = paths["summary_file"]
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for row in results:
+            resolved_cfg_path_txt = str(row.get("resolved_config_path", "")).strip()
+            resolved_cfg: dict[str, Any] | None = None
+            if resolved_cfg_path_txt:
+                resolved_cfg_path = resolve_from_repo(resolved_cfg_path_txt)
+                if resolved_cfg_path.exists():
+                    try:
+                        resolved_cfg = load_yaml(resolved_cfg_path)
+                    except Exception:
+                        resolved_cfg = None
+            writer.writerow(extract_summary_row(row, resolved_cfg))
 
 
 def benchmark_config_path(settings: dict[str, Any], bench_root: pathlib.Path) -> pathlib.Path:
@@ -781,6 +886,7 @@ def execute_experiment(
     }
     if not dry_run:
         append_result(results_path, row)
+        refresh_experiment_summary(paths)
         record_history(
             state,
             {
@@ -799,6 +905,7 @@ def execute_experiment(
 
 
 def print_status(settings: dict[str, Any], paths: dict[str, pathlib.Path], limit: int) -> int:
+    refresh_experiment_summary(paths)
     results = read_results(paths["results_file"])
     state = load_state(paths["state_file"])
     tiers = sorted(settings.get("runtime_tiers", {}).keys())

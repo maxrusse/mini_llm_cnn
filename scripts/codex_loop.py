@@ -422,14 +422,22 @@ Runtime tiers available for this search:
 
 Budget rule:
 - In open search, active exploration should use the 5m to 30m tiers.
+- In open search, use web search regularly for architecture, loss, optimization, or training ideas instead of staying fully local.
 - Use long only to finalize clearly strong candidates.
 - Compare only against runs from the same runtime tier.
+- Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
+- In open search, architecture and model-family changes are expected exploration axes, not optional extras.
+- Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
+- Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
 
 Current status output:
 {status_output}
 
 Recent results tail:
 {results_tail}
+
+Experiment summary table:
+{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=8000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
 
 Baseline config path:
 {baseline_config_path}
@@ -455,6 +463,7 @@ Output requirements:
 - For download_file, provide download_url and download_path under downloads/.
 - Use notes for a short expected outcome or blocker description.
 - Keep changes small and data-driven.
+- In open search, do not complete a whole overnight run without using web search.
 """
 
 
@@ -497,8 +506,13 @@ Runtime tiers available for this search:
 
 Budget rule:
 - Use the 5m to 30m tiers for active search.
+- In open search, use web search regularly for architecture, loss, optimization, or training ideas instead of staying fully local.
 - Use long only to finalize clearly strong candidates.
 - Compare only within the same runtime tier.
+- Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
+- In open search, architecture and model-family changes are expected exploration axes, not optional extras.
+- Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
+- Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
 
 Previous cycle summary:
 {previous_cycle_summary or "(none)"}
@@ -514,6 +528,9 @@ Current status output:
 
 Recent results tail:
 {results_tail}
+
+Experiment summary table:
+{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=8000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
 
 Current best context:
 {best_section}
