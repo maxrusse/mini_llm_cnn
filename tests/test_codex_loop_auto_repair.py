@@ -60,6 +60,55 @@ class AutoRepairHelpersTests(unittest.TestCase):
         self.assertTrue(pathlib.Path(env["TMP"]).exists())
         self.assertEqual(env["HF_HUB_DISABLE_SYMLINKS_WARNING"], "1")
 
+    def test_recent_cycles_without_web_search_counts_tail(self) -> None:
+        cycles = [
+            {"telemetry": {"used_web_search": True}},
+            {"telemetry": {"used_web_search": False}},
+            {"telemetry": {"used_web_search": False}},
+        ]
+        self.assertEqual(codex_loop.recent_cycles_without_web_search(cycles), 2)
+
+    def test_build_progress_snapshot_flags_research_refresh(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "progress_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            results_path = tmp_dir / "results.tsv"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(
+                "\n".join(
+                    [
+                        "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes",
+                        "e0001\t\tbaseline\tmedium\t\t\t\troc_auc_presence\t0.80\t1\t1\tbaseline",
+                        "e0002\te0001\tdiscard\tmedium\t\t\t\troc_auc_presence\t0.79\t1\t1\tnote",
+                        "e0003\te0001\tdiscard\tmedium\t\t\t\troc_auc_presence\t0.78\t1\t1\tnote",
+                        "e0004\te0001\tdiscard\tmedium\t\t\t\troc_auc_presence\t0.77\t1\t1\tnote",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            progress = codex_loop.build_progress_snapshot(
+                repo_root=tmp_dir,
+                results_path=results_path,
+                tier="medium",
+                metric_key="roc_auc_presence",
+                session_cycles=[
+                    {"telemetry": {"used_web_search": True}},
+                    {"telemetry": {"used_web_search": False}},
+                    {"telemetry": {"used_web_search": False}},
+                ],
+                allowed_runtime_tiers=["medium", "long"],
+                finalize_runtime_tiers=["long"],
+                code_edit_escalation_streak=8,
+                research_refresh_streak=2,
+            )
+            self.assertTrue(progress["research_refresh_due"])
+            self.assertEqual(progress["recent_cycles_without_web_search"], 2)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_extract_missing_module(self) -> None:
         text = "Traceback\nModuleNotFoundError: No module named 'segmentation_models_pytorch'\n"
         self.assertEqual(codex_loop.extract_missing_module(text), "segmentation_models_pytorch")

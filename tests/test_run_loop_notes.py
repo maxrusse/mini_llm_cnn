@@ -14,15 +14,18 @@ SPEC.loader.exec_module(run_loop)
 
 
 class RunLoopNotesTests(unittest.TestCase):
-    def test_annotate_candidate_outcome_note_marks_near_best_candidate(self) -> None:
-        note = run_loop.annotate_candidate_outcome_note(
+    def test_annotate_review_alternate_note_marks_llm_review_signal(self) -> None:
+        note = run_loop.annotate_review_alternate_note(
             note="manual config from near_best.yaml",
             primary_metric="roc_auc_presence",
             prior_best={"experiment_id": "e0006", "val_metric_value": "0.824825"},
             prior_metrics={"roc_auc_presence": 0.824825},
-            candidate_epsilon=0.005,
+            review_epsilon=0.01,
+            signals=["primary_gap=0.003800", "dice_pos_better_by=0.012000"],
         )
-        self.assertIn("near-best candidate within noise band 0.005000 of e0006", note)
+        self.assertIn("review-worthy alternate vs e0006", note)
+        self.assertIn("llm_review_epsilon=0.010000", note)
+        self.assertIn("dice_pos_better_by=0.012000", note)
 
     def test_annotate_metric_outcome_note_marks_tie(self) -> None:
         note = run_loop.annotate_metric_outcome_note(

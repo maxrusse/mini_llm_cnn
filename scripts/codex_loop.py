@@ -72,6 +72,7 @@ PLAIN_SIMPLE_UNET_STREAK_LIMIT = 3
 DEFAULT_SAME_FAMILY_MICRO_TWEAK_STREAK = 6
 DEFAULT_CODE_EDIT_ESCALATION_STREAK = 8
 DEFAULT_SAME_FAMILY_BROAD_JUMP_MIN_AXES = 2
+DEFAULT_RESEARCH_REFRESH_STREAK = 2
 
 
 class PolicyRejectError(RuntimeError):
@@ -258,6 +259,17 @@ def count_session_web_search_cycles(session_cycles: list[dict[str, Any]]) -> int
     return total
 
 
+def recent_cycles_without_web_search(session_cycles: list[dict[str, Any]]) -> int:
+    streak = 0
+    for cycle in reversed(session_cycles):
+        telemetry = cycle.get("telemetry", {})
+        used_web_search = isinstance(telemetry, dict) and bool(telemetry.get("used_web_search"))
+        if used_web_search:
+            break
+        streak += 1
+    return streak
+
+
 def determine_search_phase(
     *,
     tier: str,
@@ -289,6 +301,7 @@ def build_progress_snapshot(
     allowed_runtime_tiers: list[str],
     finalize_runtime_tiers: list[str],
     code_edit_escalation_streak: int,
+    research_refresh_streak: int,
 ) -> dict[str, Any]:
     results = load_results_rows(results_path)
     best = current_best_result(results, tier, metric_key)
@@ -305,6 +318,8 @@ def build_progress_snapshot(
         code_edit_escalation_streak=code_edit_escalation_streak,
     )
     recommended_runtime_tier = tier
+    recent_without_search = recent_cycles_without_web_search(session_cycles)
+    research_refresh_due = phase in {"refine", "finalize"} and recent_without_search >= max(1, research_refresh_streak)
     if phase == "finalize" and "long" in allowed_runtime_tiers and tier != "long":
         recommended_runtime_tier = "long"
     return {
@@ -315,6 +330,8 @@ def build_progress_snapshot(
         "family_last_keep": {tier: family_last_keep(results, repo_root, tier)},
         "code_edit_attempt_count": code_edit_attempts,
         "web_search_cycles": web_search_cycles,
+        "recent_cycles_without_web_search": recent_without_search,
+        "research_refresh_due": research_refresh_due,
         "code_edit_escalation_due": non_keep >= max(1, code_edit_escalation_streak) and code_edit_attempts == 0,
     }
 
@@ -332,9 +349,12 @@ def format_progress_snapshot(progress: dict[str, Any], tier: str) -> str:
         f"- family_last_keep[{tier}]={last_keep_text}",
         f"- code_edit_attempt_count={progress.get('code_edit_attempt_count', 0)}",
         f"- web_search_cycles={progress.get('web_search_cycles', 0)}",
+        f"- recent_cycles_without_web_search={progress.get('recent_cycles_without_web_search', 0)}",
     ]
     if progress.get("code_edit_escalation_due"):
         lines.append("- escalation_due=plateau has persisted without any code_edit attempts; prefer a code_edit experiment or a clearly broader jump.")
+    if progress.get("research_refresh_due"):
+        lines.append("- research_refresh_due=true; do web search before the next proposal and use it to justify a broader jump, alternate family, or code-edit direction.")
     return "\n".join(lines)
 
 
@@ -1140,8 +1160,9 @@ Core rules:
 - In open mode, benchmark src/ code edits are allowed via run_config.code_edits under ../xray_fracture_benchmark/src only, paired with a concrete run and bounded to one hypothesis.
 - Treat recoverable crashes as repair targets, not negative metric evidence.
 - Matched scores are discard, but they still matter as tie evidence.
-- Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
+- Near-best runs and tradeoff runs should be noted as review-worthy alternates in the ledger so the LLM can decide whether to revisit, promote, or ignore them.
 - Longer bounded programming work is allowed if it is the cleanest way to test a strong idea.
+- If a model family or kept run looks promising but still limited by the current benchmark surface, prefer extending that promising direction with benchmark src code edits rather than only retuning configs around it.
 - If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
 - If a tier has plateaued for several cycles without a keep, do not keep proposing same-family micro-tweaks. Use another family, a same-family broad jump, or benchmark src code edits.
 - A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
@@ -1150,6 +1171,7 @@ Core rules:
 
 Search expectations:
 - In open search, actively use web search, including promising ideas from other domains.
+- If loop progress says `research_refresh_due=true`, do web search before the next proposal and let that research materially affect the experiment choice.
 - Broaden if experiment_summary.tsv shows one narrow architecture or hyperparameter basin.
 - Architecture changes, model-family changes, new heads, helper modules, and end-to-end benchmark-side components are valid when justified.
 - Prefer coherent 1-4 change hypotheses, not random bundles.
@@ -1250,15 +1272,17 @@ Keep these rules active:
 - Aim for 2026+ SOTA-level ideas when feasible.
 - Use transdomain transfer when credible.
 - In open search, use web search regularly.
+- If loop progress says `research_refresh_due=true`, do web search before the next proposal and let that research materially affect the experiment choice.
 - Treat recoverable crashes as repair targets.
 - Treat matched scores as ties, not improvements.
-- Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
+- Near-best runs and tradeoff runs should be noted as review-worthy alternates in the ledger so the LLM can decide whether to revisit, promote, or ignore them.
 - Broaden if the search collapses into one narrow basin.
 - If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
 - If a tier has plateaued for several cycles without a keep, do not keep proposing same-family micro-tweaks. Use another family, a same-family broad jump, or benchmark src code edits.
 - A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
 - Benchmark src/ code edits are allowed only under ../xray_fracture_benchmark/src via run_config.code_edits, paired with one concrete hypothesis.
 - Longer bounded programming work is allowed when it is the cleanest path to a strong experiment.
+- If a model family or kept run looks promising but still limited by the current benchmark surface, prefer extending that promising direction with benchmark src code edits rather than only retuning configs around it.
 - Set the actual budget in config_yaml and state the budget reasoning briefly in `notes` for every baseline or run_config.
 - Treat wrapper policy rejections as feedback and keep searching; they are not terminal blockers.
 - If loop progress says `recommended_runtime_tier=long`, use `long` by default for finalist tie-down unless there is a strong reason to stay in `medium`.
@@ -1839,6 +1863,7 @@ def main() -> int:
     same_family_micro_tweak_streak = int(loop_cfg.get("same_family_micro_tweak_streak", DEFAULT_SAME_FAMILY_MICRO_TWEAK_STREAK))
     code_edit_escalation_streak = int(loop_cfg.get("code_edit_escalation_streak", DEFAULT_CODE_EDIT_ESCALATION_STREAK))
     same_family_broad_jump_min_axes = int(loop_cfg.get("same_family_broad_jump_min_axes", DEFAULT_SAME_FAMILY_BROAD_JUMP_MIN_AXES))
+    research_refresh_streak = int(loop_cfg.get("research_refresh_streak", DEFAULT_RESEARCH_REFRESH_STREAK))
     runtime_tier_text = runtime_tier_summary(app_cfg, allowed_runtime_tiers)
     baseline_config_path = benchmark_baseline_config_path(repo_root, app_cfg, benchmark_repo_root)
     baseline_config_text = read_text_limited(baseline_config_path, max_chars=6000)
@@ -1859,6 +1884,7 @@ def main() -> int:
         allowed_runtime_tiers=allowed_runtime_tiers,
         finalize_runtime_tiers=finalize_runtime_tiers,
         code_edit_escalation_streak=code_edit_escalation_streak,
+        research_refresh_streak=research_refresh_streak,
     )
     progress_text = format_progress_snapshot(progress, args.tier)
 
@@ -2066,6 +2092,7 @@ def main() -> int:
             allowed_runtime_tiers=allowed_runtime_tiers,
             finalize_runtime_tiers=finalize_runtime_tiers,
             code_edit_escalation_streak=code_edit_escalation_streak,
+            research_refresh_streak=research_refresh_streak,
         )
         progress_text = format_progress_snapshot(progress, args.tier)
         session_state["progress"] = progress

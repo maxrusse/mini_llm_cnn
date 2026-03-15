@@ -101,6 +101,7 @@
   "same_family_micro_tweak_streak": 6,
   "code_edit_escalation_streak": 8,
   "same_family_broad_jump_min_axes": 2,
+  "research_refresh_streak": 2,
   "cycle_pause_seconds": 5,
   "max_cycles": 1000
 }

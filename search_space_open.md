@@ -36,6 +36,7 @@ Open search-space policy for `mini_llm_cnn` night runs.
   - input-size and aspect-handling changes
   - sampling or scheduler pivots
 - Open mode may also test original method ideas through `src/` code edits when config-only search is too limiting.
+- Open mode may also strengthen a promising kept direction through `src/` code edits when the current benchmark surface is the limiting factor.
 - Valid code-edit directions include loss refinements, sampling logic improvements, architectural tweaks, better heads, new helper modules, new model classes, or full benchmark-side training/inference pipeline changes that still stay within the benchmark contract.
 - Longer bounded programming work is allowed when needed to make a strong method runnable. Open search does not need to restrict itself to only tiny edits if a larger implementation is the cleanest way to test the idea.
 - Cross-domain adaptation is explicitly valid: if a method from another domain plausibly addresses sparse targets, fine boundaries, class imbalance, calibration, or limited-data transfer, it is worth testing here.

@@ -85,7 +85,7 @@ SUMMARY_FIELDS = [
     "notes",
 ]
 KEEP_STATUSES = {"baseline", "keep"}
-TESTABLE_STATUSES = {"baseline", "keep", "candidate"}
+TESTABLE_STATUSES = {"baseline", "keep"}
 
 
 class LoopError(RuntimeError):
@@ -266,38 +266,47 @@ def annotate_ranked_outcome_note(
     )
 
 
-def is_near_best_candidate(
+def is_review_worthy_alternate(
     current: dict[str, float],
     reference: dict[str, float],
     metric_keys: list[str],
-    candidate_epsilon: float,
-) -> bool:
-    if candidate_epsilon <= 0.0 or not metric_keys:
-        return False
+    review_epsilon: float,
+) -> tuple[bool, list[str]]:
+    if review_epsilon <= 0.0 or not metric_keys:
+        return False, []
+    signals: list[str] = []
     primary = metric_keys[0]
     current_primary = float(current[primary])
     reference_primary = float(reference[primary])
-    if current_primary + candidate_epsilon < reference_primary:
-        return False
-    return True
+    primary_gap = reference_primary - current_primary
+    if primary_gap <= review_epsilon:
+        signals.append(f"primary_gap={primary_gap:.6f}")
+    for key in metric_keys[1:]:
+        current_value = float(current[key])
+        reference_value = float(reference[key])
+        if current_value > reference_value + review_epsilon:
+            signals.append(f"{key}_better_by={current_value - reference_value:.6f}")
+    return bool(signals), signals
 
 
-def annotate_candidate_outcome_note(
+def annotate_review_alternate_note(
     *,
     note: str,
     primary_metric: str,
     prior_best: dict[str, str] | None,
     prior_metrics: dict[str, float] | None,
-    candidate_epsilon: float,
+    review_epsilon: float,
+    signals: list[str],
 ) -> str:
     if prior_best is None or prior_metrics is None:
         return note
     best_id = str(prior_best.get("experiment_id", "")).strip() or "current_best"
     best_value = float(prior_metrics[primary_metric])
+    signal_text = ", ".join(signals) if signals else "no extra signals"
     return append_note(
         note,
-        f"near-best candidate within noise band {candidate_epsilon:.6f} of {best_id}; "
-        f"{primary_metric}={best_value:.6f}",
+        f"review-worthy alternate vs {best_id}; {primary_metric}={best_value:.6f}; "
+        f"llm_review_epsilon={review_epsilon:.6f}; signals={signal_text}",
     )
 
 
@@ -1030,7 +1039,12 @@ def execute_experiment(
     selection_metric = str(settings["selection_metric"])
     metric_keys = selection_metric_priority(settings)
     epsilon = float(settings.get("keep_improvement_epsilon", 1e-6))
-    candidate_epsilon = float(settings.get("candidate_metric_epsilon", 0.0))
+    review_epsilon = float(
+        settings.get(
+            "llm_review_metric_epsilon",
+            settings.get("candidate_metric_epsilon", 0.0),
+        )
+    )
 
     run_dir = runs_dir / experiment_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1106,20 +1120,6 @@ def execute_experiment(
                 else:
                     if keep:
                         status = "keep"
-                    elif prior_best is not None and prior_metrics is not None and is_near_best_candidate(
-                        metric_bundle,
-                        prior_metrics,
-                        metric_keys,
-                        candidate_epsilon,
-                    ):
-                        status = "candidate"
-                        note = annotate_candidate_outcome_note(
-                            note=note,
-                            primary_metric=selection_metric,
-                            prior_best=prior_best,
-                            prior_metrics=prior_metrics,
-                            candidate_epsilon=candidate_epsilon,
-                        )
                     else:
                         status = "discard"
                         note = annotate_ranked_outcome_note(
@@ -1130,6 +1130,22 @@ def execute_experiment(
                             prior_metrics=prior_metrics,
                             comparison=comparison if prior_best is not None else 0,
                         )
+                        if prior_best is not None and prior_metrics is not None:
+                            review_worthy, review_signals = is_review_worthy_alternate(
+                                metric_bundle,
+                                prior_metrics,
+                                metric_keys,
+                                review_epsilon,
+                            )
+                            if review_worthy:
+                                note = annotate_review_alternate_note(
+                                    note=note,
+                                    primary_metric=selection_metric,
+                                    prior_best=prior_best,
+                                    prior_metrics=prior_metrics,
+                                    review_epsilon=review_epsilon,
+                                    signals=review_signals,
+                                )
     elif dry_run:
         status = "dry_run"
         metric_value_txt = ""
@@ -1414,7 +1430,7 @@ def do_test(settings: dict[str, Any], paths: dict[str, pathlib.Path], experiment
     if row is None:
         raise LoopError(f"Unknown experiment id: {experiment_id}")
     if row.get("status") not in TESTABLE_STATUSES:
-        raise LoopError(f"Locked test is only allowed for kept, candidate, or baseline runs: {experiment_id}")
+        raise LoopError(f"Locked test is only allowed for kept or baseline runs: {experiment_id}")
 
     state = load_state(paths["state_file"])
     bench_root = paths["benchmark_repo_root"]

@@ -59,23 +59,24 @@ class SelectionMetricPolicyTests(unittest.TestCase):
         self.assertEqual(comparison, 1)
         self.assertEqual(decisive, "average_precision_presence")
 
-    def test_is_near_best_candidate_uses_primary_metric_noise_band(self) -> None:
-        self.assertTrue(
-            run_loop.is_near_best_candidate(
-                {"roc_auc_presence": 0.8210, "average_precision_presence": 0.50},
-                {"roc_auc_presence": 0.8248, "average_precision_presence": 0.90},
-                ["roc_auc_presence", "average_precision_presence"],
-                0.005,
-            )
+    def test_is_review_worthy_alternate_uses_primary_gap_or_secondary_gain(self) -> None:
+        worthy, signals = run_loop.is_review_worthy_alternate(
+            {"roc_auc_presence": 0.8210, "average_precision_presence": 0.50},
+            {"roc_auc_presence": 0.8248, "average_precision_presence": 0.90},
+            ["roc_auc_presence", "average_precision_presence"],
+            0.005,
         )
-        self.assertFalse(
-            run_loop.is_near_best_candidate(
-                {"roc_auc_presence": 0.8180, "average_precision_presence": 0.95},
-                {"roc_auc_presence": 0.8248, "average_precision_presence": 0.10},
-                ["roc_auc_presence", "average_precision_presence"],
-                0.005,
-            )
+        self.assertTrue(worthy)
+        self.assertIn("primary_gap=0.003800", signals)
+
+        worthy, signals = run_loop.is_review_worthy_alternate(
+            {"roc_auc_presence": 0.8180, "average_precision_presence": 0.95},
+            {"roc_auc_presence": 0.8248, "average_precision_presence": 0.10},
+            ["roc_auc_presence", "average_precision_presence"],
+            0.005,
         )
+        self.assertTrue(worthy)
+        self.assertIn("average_precision_presence_better_by=0.850000", signals)
 
 
 if __name__ == "__main__":

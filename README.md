@@ -81,10 +81,10 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - baseline first
 - compare only within the same runtime tier
 - runtime tiers are comparison buckets only; the wrapper no longer injects legacy time-based epoch or batch caps
-- each baseline or candidate run should state its own expected runtime and budget reasoning
+- each baseline or promising alternate run should state its own expected runtime and budget reasoning
 - `medium` is the main exploration/evaluation bucket, while `long` is for final tie-down of the strongest candidates rather than a preset training length
 - `keep` only when the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos` improves
-- near-best runs within the configured noise band are retained as `candidate` instead of being discarded outright, so faster or otherwise attractive alternatives stay visible for finalist selection
+- near-best or tradeoff runs are annotated as review-worthy alternates in the ledger, so the LLM can decide whether they deserve follow-up despite losing on the primary stack
 - recoverable crashes should trigger repair work when the direction still looks promising; they are not the same as measured negative results
 - matched scores stay `discard`, but should remain visible and be noted explicitly as ties in the ledger
 - when a tier plateaus for several cycles without a new keep, the loop should broaden rather than keep making same-family config-only tweaks

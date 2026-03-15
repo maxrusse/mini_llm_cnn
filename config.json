@@ -10,7 +10,7 @@
   "logs_dir": "logs",
   "runs_dir": "runs",
   "keep_improvement_epsilon": 1e-06,
-  "candidate_metric_epsilon": 0.005,
+  "llm_review_metric_epsilon": 0.01,
   "runtime_tiers": {
     "smoke": {
       "comparison_only": true,

@@ -33,12 +33,14 @@
 - Keep the loop config-driven and deterministic where possible.
 - Log every attempted experiment to `results.tsv`.
 - Each run must preserve its generated config, logs, checkpoint path, and validation metrics path.
-- For each baseline or candidate run, the agent should state the expected runtime and why that budget matches the method change.
-- Near-best runs within the configured noise band should be retained as `candidate` so faster or otherwise attractive alternatives remain available for finalist comparison.
+- For each baseline or promising alternate run, the agent should state the expected runtime and why that budget matches the method change.
+- Near-best or tradeoff runs should be recorded as review-worthy alternates for the LLM to judge, rather than auto-promoted by a fixed wrapper rule.
 - If several cycles plateau without a new keep, the search should broaden to another family, a coherent same-family broad jump, or benchmark `src/` code edits instead of continuing same-family micro-tuning.
+- If a kept direction looks strong but obviously benchmark-limited, prefer a bounded benchmark `src/` implementation on top of that promising direction instead of only more config retuning.
 - Wrapper policy rejections are non-terminal loop feedback and should trigger a broader follow-up proposal, not session termination.
 - If the loop behavior or CLI changes, update `README.md` and `program.md`.
 - Keep Codex loop state minimal: one repo-local `CODEX_HOME`, one thread id file, one session state file, and log files.
+- Before starting a fresh round, archive old run artifacts outside the repo so a new session starts clean without local-result leakage.
 
 ## Operational Commands
 - Login Codex for this repo: `& .\scripts\login_codex.ps1`

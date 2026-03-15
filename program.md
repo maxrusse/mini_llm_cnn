@@ -54,6 +54,7 @@ Integrate transdomain knowledge when useful: if another domain has a method that
 - A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
 - Treat wrapper policy rejections as feedback, not session-ending blockers.
 - If plateau persists with zero `code_edits` attempts, the next rounds should bias toward a benchmark `src/` implementation experiment instead of another local config-only nudge.
+- If a kept family looks genuinely promising, the next step may be a benchmark `src/` implementation that strengthens that family directly, not only another config sweep around it.
 - When local tuning goes flat, broaden with benchmark-supported architecture moves such as:
   - model family or backbone changes
   - width or capacity changes
@@ -63,8 +64,9 @@ Integrate transdomain knowledge when useful: if another domain has a method that
 - Do not spend a whole night only retuning BCE/Dice weights or learning rate around one architecture unless the results clearly justify that focus.
 - In `open` mode, do not underuse the available GPU budget. Consider stronger architectures, pretrained backbones, larger inputs, or larger batches when they fit the benchmark contract and the current tier.
 - Prefer config changes that are understandable and tied to evidence from prior results.
-- If a run lands close enough to the best that it may be within noise, keep it as a `candidate` instead of discarding it, especially when it is faster, simpler, or otherwise attractive for final comparison.
-- In `limited` mode, keep candidate configs small and specific.
+- If a run lands close to the best or wins on useful secondary tradeoffs, let the ledger note it as a review-worthy alternate and decide in the next LLM turn whether it deserves follow-up.
+- Before a fresh restart, archive the prior run outside the repo so the next session cannot read it from local project files.
+- In `limited` mode, keep alternate-review configs small and specific.
 - In `open` mode, one controlled change is preferred for clean attribution, but you may bundle 2-4 tightly related changes when that is the faster data-driven path.
 - Open-mode bundles must be coherent, not random:
   - example: pretrained backbone + matching model-family switch + batch-size adjustment
