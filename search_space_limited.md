@@ -3,8 +3,10 @@
 Limited search-space policy for `mini_llm_cnn` night runs.
 
 ## Goal
-- Primary goal: improve validation `dice_pos`.
+- Primary goal: improve the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`.
 - Compare only within the same runtime tier.
+- `runtime_tier` is a comparison bucket only. The config itself sets the real training budget.
+- Use `medium` as the main exploration/evaluation bucket and `long` to tie down the strongest candidates at the end of exploration.
 - `test` stays locked until there is an explicit finalist selection.
 - Limited search should still use real GPU budgets, not ultra-short proxy runs.
 
@@ -18,6 +20,7 @@ Limited search-space policy for `mini_llm_cnn` night runs.
 ### Model families
 - `simple_unet`
 - `simple_unet_dual_head`
+- `deeplabv3` with `backbone: resnet50|resnet101`
 - `deeplabv3_resnet50`
 - `deeplabv3_resnet101`
 - `deeplabv3_resnet50_dual_head`
@@ -66,7 +69,8 @@ Limited search-space policy for `mini_llm_cnn` night runs.
 - Arbitrary repo expansion without a clear link to the existing benchmark.
 
 ## Overnight Strategy
-- Fresh start per tier: baseline first, then conservative search using `medium`, `medium_20m`, and `medium_30m` inside the limited search space.
-- Use `long` only for candidates that are clearly better than baseline in the shorter search tiers and deserve up to about 2 hours of GPU time.
+- Fresh start per tier: baseline first, then conservative search inside the chosen comparison bucket.
+- The agent must set the real budget directly in config and state why it fits the change.
+- Use `long` to tie down the strongest candidates at the end of exploration.
 - Express new ideas as small, reviewable config changes; avoid uncontrolled bundled jumps at the start.
 - If a strong parent already exists, continue searching from that parent; otherwise start from baseline.

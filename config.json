@@ -2,7 +2,7 @@
   "benchmark_repo_root": "../xray_fracture_benchmark",
   "benchmark_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
   "baseline_config": "configs/baseline.yaml",
-  "selection_metric": "dice_pos",
+  "selection_metric": "roc_auc_presence",
   "default_tier": "medium",
   "results_file": "results.tsv",
   "state_file": ".mini_loop/state.json",
@@ -10,67 +10,19 @@
   "logs_dir": "logs",
   "runs_dir": "runs",
   "keep_improvement_epsilon": 1e-06,
+  "candidate_metric_epsilon": 0.005,
   "runtime_tiers": {
     "smoke": {
-      "approx_minutes": 1,
-      "overrides": {
-        "training": {
-          "epochs": 2,
-          "max_train_batches": 10,
-          "max_eval_batches": 5
-        }
-      }
-    },
-    "medium_5m": {
-      "approx_minutes": 5,
-      "overrides": {
-        "training": {
-          "epochs": 9,
-          "max_train_batches": 330,
-          "max_eval_batches": 40
-        }
-      }
+      "comparison_only": true,
+      "description": "debug or smoke-test comparison bucket; the config itself sets epochs and batch limits"
     },
     "medium": {
-      "approx_minutes": 10,
-      "overrides": {
-        "training": {
-          "epochs": 10,
-          "max_train_batches": 600,
-          "max_eval_batches": 60
-        }
-      }
-    },
-    "medium_20m": {
-      "approx_minutes": 20,
-      "overrides": {
-        "training": {
-          "epochs": 12,
-          "max_train_batches": 1100,
-          "max_eval_batches": 80
-        }
-      }
-    },
-    "medium_30m": {
-      "approx_minutes": 30,
-      "overrides": {
-        "training": {
-          "epochs": 16,
-          "max_train_batches": 1200,
-          "max_eval_batches": 100
-        }
-      }
+      "comparison_only": true,
+      "description": "main exploration and evaluation bucket"
     },
     "long": {
-      "approx_minutes": 120,
-      "finalize_only": true,
-      "overrides": {
-        "training": {
-          "epochs": 24,
-          "max_train_batches": 3000,
-          "max_eval_batches": 160
-        }
-      }
+      "comparison_only": true,
+      "description": "final tie-down bucket for strongest candidates"
     }
   }
 }

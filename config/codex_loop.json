@@ -1,21 +1,27 @@
 {
-  "model": "gpt-5.4",
+  "model": "gpt-5.3-codex-spark",
   "reasoning_effort": "high",
   "web_search_mode": "live",
   "network_access_enabled": true,
   "skip_git_repo_check": false,
   "sandbox_mode": "workspace-write",
+  "runtime_env": {
+    "TORCH_HOME": ".mini_loop/torch_cache",
+    "HF_HOME": ".mini_loop/hf_home",
+    "HUGGINGFACE_HUB_CACHE": ".mini_loop/hf_home/hub",
+    "PIP_CACHE_DIR": ".mini_loop/pip_cache",
+    "TMP": ".mini_loop/tmp",
+    "TEMP": ".mini_loop/tmp",
+    "TMPDIR": ".mini_loop/tmp",
+    "HF_HUB_DISABLE_SYMLINKS_WARNING": "1"
+  },
   "controller_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
   "open_search_runtime_tiers": [
-    "medium_5m",
     "medium",
-    "medium_20m",
-    "medium_30m",
     "long"
   ],
   "limited_search_runtime_tiers": [
     "medium",
-    "medium_20m",
     "long"
   ],
   "finalize_runtime_tiers": [
@@ -25,6 +31,73 @@
   "thread_id_file": ".mini_loop/codex_thread_id.txt",
   "session_state_file": ".mini_loop/codex_session.json",
   "stop_flag_file": ".mini_loop/STOP_CODEX_LOOP",
+  "auto_repair_enabled": true,
+  "auto_repair_retry_on_success": true,
+  "auto_repair_allow_direct_module_install": true,
+  "auto_repair_module_package_map": {
+    "segmentation_models_pytorch": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "timm": [
+      "timm"
+    ],
+    "einops": [
+      "einops"
+    ],
+    "transformers": [
+      "transformers"
+    ]
+  },
+  "auto_repair_module_alias_map": {
+    "cv2": [
+      "opencv-python"
+    ],
+    "pil": [
+      "pillow"
+    ],
+    "yaml": [
+      "pyyaml"
+    ],
+    "sklearn": [
+      "scikit-learn"
+    ]
+  },
+  "auto_repair_model_package_map": {
+    "deeplabv3": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "deeplabv3_dual": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "deeplabv3_dual_head": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "unet_resnet34": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "unet_resnet34_dual": [
+      "segmentation-models-pytorch",
+      "timm"
+    ],
+    "unet_resnet34_dual_head": [
+      "segmentation-models-pytorch",
+      "timm"
+    ]
+  },
+  "auto_repair_model_fallback_map": {
+    "deeplabv3": "deeplabv3_resnet50",
+    "deeplabv3_dual": "deeplabv3_resnet50_dual_head",
+    "deeplabv3_dual_head": "deeplabv3_resnet50_dual_head",
+    "unet_resnet34": "simple_unet",
+    "unet_resnet34_dual": "simple_unet_dual_head",
+    "unet_resnet34_dual_head": "simple_unet_dual_head"
+  },
+  "done_allowed_within_minutes": 30,
   "cycle_pause_seconds": 5,
   "max_cycles": 1000
 }

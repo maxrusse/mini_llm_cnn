@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+import yaml
 
 
 ACTION_VALUES: tuple[str, ...] = (
@@ -28,6 +31,44 @@ ACTION_VALUES: tuple[str, ...] = (
 )
 
 CODE_EDIT_FIELDS: tuple[str, str] = ("path", "content")
+DEFAULT_AUTO_REPAIR_MODULE_PACKAGE_MAP: dict[str, list[str]] = {
+    "segmentation_models_pytorch": ["segmentation-models-pytorch", "timm"],
+    "timm": ["timm"],
+    "einops": ["einops"],
+    "transformers": ["transformers"],
+}
+DEFAULT_AUTO_REPAIR_MODULE_ALIAS_MAP: dict[str, list[str]] = {
+    "cv2": ["opencv-python"],
+    "pil": ["pillow"],
+    "yaml": ["pyyaml"],
+    "sklearn": ["scikit-learn"],
+}
+DEFAULT_AUTO_REPAIR_MODEL_PACKAGE_MAP: dict[str, list[str]] = {
+    "deeplabv3": ["segmentation-models-pytorch", "timm"],
+    "deeplabv3_dual": ["segmentation-models-pytorch", "timm"],
+    "deeplabv3_dual_head": ["segmentation-models-pytorch", "timm"],
+    "unet_resnet34": ["segmentation-models-pytorch", "timm"],
+    "unet_resnet34_dual": ["segmentation-models-pytorch", "timm"],
+    "unet_resnet34_dual_head": ["segmentation-models-pytorch", "timm"],
+}
+DEFAULT_AUTO_REPAIR_MODEL_FALLBACK_MAP: dict[str, str] = {
+    "deeplabv3": "deeplabv3_resnet50",
+    "deeplabv3_dual": "deeplabv3_resnet50_dual_head",
+    "deeplabv3_dual_head": "deeplabv3_resnet50_dual_head",
+    "unet_resnet34": "simple_unet",
+    "unet_resnet34_dual": "simple_unet_dual_head",
+    "unet_resnet34_dual_head": "simple_unet_dual_head",
+}
+PATH_LIKE_ENV_VARS: set[str] = {
+    "TORCH_HOME",
+    "HF_HOME",
+    "HUGGINGFACE_HUB_CACHE",
+    "PIP_CACHE_DIR",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+}
+PLAIN_SIMPLE_UNET_STREAK_LIMIT = 3
 
 
 def utc_now() -> str:
@@ -53,6 +94,29 @@ def rel_or_abs(path: pathlib.Path, root: pathlib.Path) -> str:
 def resolve_repo_path(repo_root: pathlib.Path, raw: str) -> pathlib.Path:
     path = pathlib.Path(raw)
     return path if path.is_absolute() else (repo_root / path).resolve()
+
+
+def build_runtime_env(repo_root: pathlib.Path, loop_cfg: dict[str, Any], *, codex_home: pathlib.Path | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    overrides = loop_cfg.get("runtime_env", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    for key, value in overrides.items():
+        key_txt = str(key).strip()
+        if not key_txt:
+            continue
+        value_txt = str(value).strip()
+        if key_txt in PATH_LIKE_ENV_VARS:
+            target = pathlib.Path(value_txt)
+            if not target.is_absolute():
+                target = (repo_root / target).resolve()
+            target.mkdir(parents=True, exist_ok=True)
+            env[key_txt] = str(target)
+        else:
+            env[key_txt] = value_txt
+    if codex_home is not None:
+        env["CODEX_HOME"] = str(codex_home)
+    return env
 
 
 def try_read_text(path: pathlib.Path) -> str:
@@ -95,23 +159,14 @@ def list_allowed_runtime_tiers(loop_cfg: dict[str, Any], search_space: str, app_
 def runtime_tier_summary(app_cfg: dict[str, Any], allowed_tiers: list[str]) -> str:
     lines: list[str] = []
     tier_specs = app_cfg.get("runtime_tiers", {})
-    finalize_tier = "long"
     for name in allowed_tiers:
         spec = tier_specs.get(name, {})
-        approx = ""
-        finalize_only = False
+        description = ""
         if isinstance(spec, dict):
-            approx_raw = spec.get("approx_minutes")
-            if approx_raw is not None:
-                approx = f"~{approx_raw}m"
-            finalize_only = bool(spec.get("finalize_only", False))
-        extras: list[str] = []
-        if approx:
-            extras.append(approx)
-        if finalize_only or name == finalize_tier:
-            extras.append("finalize-only")
-        suffix = f" ({', '.join(extras)})" if extras else ""
+            description = str(spec.get("description", "")).strip()
+        suffix = f": {description}" if description else ""
         lines.append(f"- {name}{suffix}")
+    lines.append("- No automatic epoch or batch caps are applied by the wrapper. The config itself defines training budget.")
     return "\n".join(lines)
 
 
@@ -163,6 +218,7 @@ def extract_best_config_context(
     if best is None:
         return {
             "experiment_id": "",
+            "metric_key": metric_key,
             "metric": "",
             "config_path": "",
             "config_text": "",
@@ -170,9 +226,10 @@ def extract_best_config_context(
 
     preferred = str(best.get("resolved_config_path", "")).strip() or str(best.get("config_path", "")).strip()
     config_path = resolve_repo_path(repo_root, preferred) if preferred else pathlib.Path()
-    config_text = read_text_limited(config_path, max_chars=12000) if preferred and config_path.exists() else ""
+    config_text = read_text_limited(config_path, max_chars=6000) if preferred and config_path.exists() else ""
     return {
         "experiment_id": str(best.get("experiment_id", "")).strip(),
+        "metric_key": metric_key,
         "metric": str(best.get("val_metric_value", "")).strip(),
         "config_path": preferred,
         "config_text": config_text,
@@ -227,6 +284,257 @@ def run_logged_command(
     }
 
 
+def tail_text(path: pathlib.Path, *, max_bytes: int = 24000) -> str:
+    if not path.exists():
+        return ""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = size - max_bytes if size > max_bytes else 0
+            handle.seek(start)
+            return handle.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def normalize_package_map(raw: Any, defaults: dict[str, list[str]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    merged = dict(defaults)
+    if isinstance(raw, dict):
+        merged.update(raw)
+    for key, value in merged.items():
+        key_txt = str(key).strip().lower()
+        if not key_txt:
+            continue
+        items = value if isinstance(value, list) else [value]
+        packages: list[str] = []
+        for item in items:
+            package = str(item).strip()
+            if package and package not in packages:
+                packages.append(package)
+        if packages:
+            out[key_txt] = packages
+    return out
+
+
+def normalize_fallback_map(raw: Any, defaults: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    merged = dict(defaults)
+    if isinstance(raw, dict):
+        merged.update(raw)
+    for key, value in merged.items():
+        key_txt = str(key).strip().lower()
+        replacement = str(value).strip()
+        if key_txt and replacement:
+            out[key_txt] = replacement
+    return out
+
+
+def extract_missing_module(log_text: str) -> str | None:
+    if not log_text:
+        return None
+    match = re.search(r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]", log_text)
+    if not match:
+        return None
+    return str(match.group(1)).strip()
+
+
+def extract_unsupported_model_name(log_text: str) -> str | None:
+    if not log_text:
+        return None
+    match = re.search(r"Unsupported model\.name:\s*([A-Za-z0-9_\-\.]+)", log_text)
+    if not match:
+        return None
+    return str(match.group(1)).strip()
+
+
+def infer_direct_module_packages(missing_module: str, alias_map: dict[str, list[str]]) -> list[str]:
+    module_txt = str(missing_module).strip()
+    if not module_txt:
+        return []
+    root = module_txt.split(".")[0].strip()
+    key = root.lower()
+    if key in alias_map:
+        return list(alias_map[key])
+    packages: list[str] = []
+    for item in [module_txt, root, root.replace("_", "-"), module_txt.replace(".", "-")]:
+        package = str(item).strip()
+        if package and package not in packages:
+            packages.append(package)
+    return packages
+
+
+def patch_model_name_in_yaml_config(
+    *,
+    repo_root: pathlib.Path,
+    config_path: pathlib.Path,
+    unsupported_model: str,
+    replacement_model: str,
+    label: str,
+) -> pathlib.Path | None:
+    if not config_path.exists():
+        return None
+    original_text = config_path.read_text(encoding="utf-8", errors="ignore")
+    pattern = re.compile(
+        rf"(?mi)^(\s*name\s*:\s*)(['\"]?){re.escape(unsupported_model)}(['\"]?)\s*$"
+    )
+    patched_text, changed = pattern.subn(rf"\1\2{replacement_model}\3", original_text, count=1)
+    if changed <= 0:
+        return None
+    out_dir = ensure_dir(repo_root / ".mini_loop" / "autofix_configs")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_name = f"{stamp}_{slugify(label)}_{config_path.stem}_autofix_{slugify(replacement_model)}{config_path.suffix or '.yaml'}"
+    out_path = out_dir / out_name
+    out_path.write_text(patched_text, encoding="utf-8")
+    return out_path
+
+
+def apply_model_name_fallback_to_run_command(
+    *,
+    repo_root: pathlib.Path,
+    command: list[str],
+    unsupported_model: str,
+    fallback_map: dict[str, str],
+    label: str,
+) -> tuple[list[str], pathlib.Path] | None:
+    replacement = str(fallback_map.get(unsupported_model.strip().lower(), "")).strip()
+    if not replacement:
+        return None
+    if "--config" not in command:
+        return None
+    config_index = command.index("--config") + 1
+    if config_index >= len(command):
+        return None
+    config_path = pathlib.Path(command[config_index])
+    patched_config = patch_model_name_in_yaml_config(
+        repo_root=repo_root,
+        config_path=config_path,
+        unsupported_model=unsupported_model,
+        replacement_model=replacement,
+        label=label,
+    )
+    if not patched_config:
+        return None
+    patched_command = list(command)
+    patched_command[config_index] = str(patched_config)
+    return patched_command, patched_config
+
+
+def install_packages_with_python(
+    *,
+    python_exe: pathlib.Path,
+    cwd: pathlib.Path,
+    packages: list[str],
+    log_path: pathlib.Path,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    if not packages:
+        return {"attempted": False, "success": False, "packages": []}
+    command = [str(python_exe), "-m", "pip", "install", *packages]
+    outcome = run_logged_command(cmd=command, cwd=cwd, log_path=log_path, env=env)
+    return {
+        "attempted": True,
+        "success": int(outcome.get("returncode", 1)) == 0,
+        "packages": packages,
+        "command": command,
+        "log_path": outcome.get("log_path", str(log_path)),
+        "returncode": int(outcome.get("returncode", 1)),
+        "elapsed_seconds": outcome.get("elapsed_seconds", 0.0),
+    }
+
+
+def attempt_auto_repair(
+    *,
+    repo_root: pathlib.Path,
+    benchmark_repo_root: pathlib.Path,
+    benchmark_python: pathlib.Path,
+    command: list[str],
+    log_path: pathlib.Path,
+    logs_dir: pathlib.Path,
+    label: str,
+    cycle_slug: str,
+    auto_repair_enabled: bool,
+    auto_repair_allow_direct_module_install: bool,
+    auto_repair_module_package_map: dict[str, list[str]],
+    auto_repair_module_alias_map: dict[str, list[str]],
+    auto_repair_model_package_map: dict[str, list[str]],
+    auto_repair_model_fallback_map: dict[str, str],
+    runtime_env: dict[str, str],
+) -> dict[str, Any] | None:
+    if not auto_repair_enabled:
+        return None
+    log_tail = tail_text(log_path)
+    if not log_tail:
+        return None
+
+    missing_module = extract_missing_module(log_tail)
+    unsupported_model = extract_unsupported_model_name(log_tail)
+    if not missing_module and not unsupported_model:
+        return None
+
+    repair: dict[str, Any] = {
+        "reason": "",
+        "missing_module": missing_module or "",
+        "unsupported_model": unsupported_model or "",
+        "packages": [],
+        "pip": {"attempted": False, "success": False, "packages": []},
+        "model_fallback_applied": False,
+    }
+
+    retry_command: list[str] | None = None
+    if missing_module:
+        key = missing_module.strip().lower()
+        packages = list(auto_repair_module_package_map.get(key, []))
+        if not packages and auto_repair_allow_direct_module_install:
+            packages = infer_direct_module_packages(missing_module, auto_repair_module_alias_map)
+        repair["reason"] = f"missing_module:{missing_module}"
+        repair["packages"] = packages
+        if packages:
+            install_log = logs_dir / f"{cycle_slug}_{label}_autofix_install.log"
+            repair["pip"] = install_packages_with_python(
+                python_exe=benchmark_python,
+                cwd=benchmark_repo_root,
+                packages=packages,
+                log_path=install_log,
+                env=runtime_env,
+            )
+            if bool(repair["pip"].get("success", False)):
+                retry_command = list(command)
+    elif unsupported_model:
+        repair["reason"] = f"unsupported_model:{unsupported_model}"
+        fallback = apply_model_name_fallback_to_run_command(
+            repo_root=repo_root,
+            command=command,
+            unsupported_model=unsupported_model,
+            fallback_map=auto_repair_model_fallback_map,
+            label=label,
+        )
+        if fallback is not None:
+            retry_command, patched_config = fallback
+            repair["model_fallback_applied"] = True
+            repair["patched_config_path"] = str(patched_config)
+        else:
+            packages = list(auto_repair_model_package_map.get(unsupported_model.strip().lower(), []))
+            repair["packages"] = packages
+            if packages:
+                install_log = logs_dir / f"{cycle_slug}_{label}_autofix_install.log"
+                repair["pip"] = install_packages_with_python(
+                    python_exe=benchmark_python,
+                    cwd=benchmark_repo_root,
+                    packages=packages,
+                    log_path=install_log,
+                    env=runtime_env,
+                )
+                if bool(repair["pip"].get("success", False)):
+                    retry_command = list(command)
+
+    if retry_command is None and not repair["model_fallback_applied"] and not bool(repair["pip"].get("attempted", False)):
+        return None
+    repair["retry_command"] = retry_command or []
+    return repair
+
+
 def slugify(text: str) -> str:
     cleaned = []
     for ch in str(text).strip().lower():
@@ -277,7 +585,7 @@ def build_action_schema() -> dict[str, Any]:
             "download_path": {"type": "string"},
             "code_edits": {
                 "type": "array",
-                "maxItems": 4,
+                "maxItems": 8,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
@@ -308,7 +616,7 @@ def coerce_action(raw_action: Any) -> dict[str, Any]:
     code_edits_raw = raw.get("code_edits", [])
     code_edits: list[dict[str, str]] = []
     if isinstance(code_edits_raw, list):
-        for item in code_edits_raw[:4]:
+        for item in code_edits_raw[:8]:
             if not isinstance(item, dict):
                 continue
             path = str(item.get("path", "")).strip()
@@ -365,6 +673,145 @@ def validate_action(action: dict[str, Any]) -> list[str]:
     return issues
 
 
+def validate_action_policy(
+    *,
+    action: dict[str, Any],
+    search_space_name: str,
+    deadline: datetime,
+    done_allowed_within_minutes: int,
+    stop_flag_exists: bool,
+) -> list[str]:
+    issues: list[str] = []
+    kind = str(action.get("action", "")).strip().lower()
+    if kind == "done" and not stop_flag_exists:
+        remaining_seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining_seconds > max(0, int(done_allowed_within_minutes)) * 60:
+            issues.append(
+                "done_too_early:"
+                f" remaining_hours={round(remaining_seconds / 3600.0, 2)}"
+                f" guard_minutes={int(done_allowed_within_minutes)}"
+            )
+    if kind == "done" and search_space_name == "open":
+        note_text = " ".join(
+            [
+                str(action.get("rationale", "")).strip(),
+                str(action.get("notes", "")).strip(),
+            ]
+        ).lower()
+        if "block" in note_text:
+            issues.append("use_blocked_not_done_for_external_blockers")
+    return issues
+
+
+def normalize_config_yaml_text(raw_yaml: str) -> str:
+    text = str(raw_yaml).strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if "\\n" in text and text.count("\n") <= 1:
+        text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def repair_common_yaml_glitches(yaml_text: str) -> str:
+    repaired = str(yaml_text)
+    # Common streamed-output glitch: a stray leading character gets attached
+    # to an indented key, e.g. `n  bce_weight: 0.4`.
+    repaired = re.sub(
+        r"(?m)^[A-Za-z]([ \t]{2,}[A-Za-z_][A-Za-z0-9_]*\s*:)",
+        r"\1",
+        repaired,
+    )
+    return repaired
+
+
+def sanitize_config_yaml_text(raw_yaml: str) -> str:
+    text = normalize_config_yaml_text(raw_yaml)
+    candidate_texts = [text]
+    repaired = repair_common_yaml_glitches(text)
+    if repaired != text:
+        candidate_texts.append(repaired)
+    last_error: Exception | None = None
+    for candidate in candidate_texts:
+        try:
+            payload = yaml.safe_load(candidate)
+        except yaml.YAMLError as exc:
+            last_error = exc
+            continue
+        if not isinstance(payload, dict):
+            raise RuntimeError("config_yaml must parse to a YAML mapping")
+        return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False).rstrip() + "\n"
+    raise RuntimeError(f"config_yaml is not valid YAML: {last_error}")
+
+
+def extract_model_name_from_yaml_text(yaml_text: str) -> str:
+    if not yaml_text:
+        return ""
+    block = re.search(r"(?ms)^\s*model\s*:\s*\n(?P<body>(?:^[ \t]+.*\n?)*)", yaml_text)
+    if not block:
+        return ""
+    body = str(block.group("body"))
+    match = re.search(r"(?m)^[ \t]+name\s*:\s*['\"]?([A-Za-z0-9_\-\.]+)['\"]?\s*$", body)
+    if not match:
+        return ""
+    return str(match.group(1)).strip().lower()
+
+
+def model_name_from_result_row(repo_root: pathlib.Path, row: dict[str, str]) -> str:
+    for key in ("resolved_config_path", "config_path"):
+        raw = str(row.get(key, "")).strip()
+        if not raw:
+            continue
+        path = resolve_repo_path(repo_root, raw)
+        text = try_read_text(path)
+        name = extract_model_name_from_yaml_text(text)
+        if name:
+            return name
+    return ""
+
+
+def recent_non_keep_streak(
+    *,
+    results_path: pathlib.Path,
+    tier: str,
+) -> int:
+    rows = load_results_rows(results_path)
+    streak = 0
+    for row in reversed(rows):
+        if row.get("runtime_tier") != tier:
+            continue
+        status = str(row.get("status", "")).strip().lower()
+        if status in {"baseline", "keep"}:
+            break
+        streak += 1
+    return streak
+
+
+def recent_plain_simple_unet_streak(
+    *,
+    repo_root: pathlib.Path,
+    results_path: pathlib.Path,
+    tier: str,
+) -> int:
+    rows = load_results_rows(results_path)
+    streak = 0
+    for row in reversed(rows):
+        if row.get("runtime_tier") != tier:
+            continue
+        status = str(row.get("status", "")).strip().lower()
+        if status == "baseline":
+            break
+        model_name = model_name_from_result_row(repo_root, row)
+        if model_name != "simple_unet":
+            break
+        streak += 1
+    return streak
+
+
 def normalize_generated_config_path(repo_root: pathlib.Path, raw_path: str) -> pathlib.Path:
     candidate = pathlib.Path(str(raw_path).strip())
     if candidate.is_absolute():
@@ -410,6 +857,7 @@ def build_initial_prompt(
     benchmark_python: pathlib.Path,
     tier: str,
     deadline_utc: str,
+    done_guard_minutes: int,
     search_space_name: str,
     search_space_text: str,
     runtime_tier_text: str,
@@ -423,100 +871,94 @@ def build_initial_prompt(
     if best_context.get("experiment_id"):
         best_section = (
             f"Current best experiment: {best_context['experiment_id']}\n"
-            f"Current best dice_pos: {best_context['metric']}\n"
+            f"Current best {best_context.get('metric_key') or 'metric'}: {best_context['metric']}\n"
             f"Current best config path: {best_context['config_path']}\n"
             f"Current best config text:\n{best_context['config_text'] or '(unavailable)'}"
         )
 
-    return f"""You are the single research agent for this repository.
+    return f"""You are the single research agent for this repo.
 
-Repository: {repo_root}
-Benchmark repo: {benchmark_repo_root}
-Benchmark Python: {benchmark_python}
-Tier: {tier}
-Hard deadline UTC: {deadline_utc}
-Search-space mode: {search_space_name}
+Context:
+- repo={repo_root}
+- benchmark_repo={benchmark_repo_root}
+- benchmark_python={benchmark_python}
+- tier={tier}
+- deadline_utc={deadline_utc}
+- search_space={search_space_name}
 
-You are not allowed to execute shell commands directly in this turn.
-You are not allowed to edit files directly in this turn.
-Instead, return exactly one JSON action. The wrapper will execute it and resume the same thread with the result.
+Return exactly one JSON action. Do not execute shell commands or edit files directly; the wrapper does that. The wrapper may auto-repair one failed run_config once.
 
-Hard rules:
-- Optimize validation dice_pos only.
+Core rules:
+- Optimize the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`.
+- `runtime_tier` is a comparison bucket only, not an automatic time cap. The config itself must define the real training budget.
+- Compare only within the same runtime tier.
+- Aim for 2026+ SOTA-level ideas when feasible.
+- Use transdomain transfer when the mapping is credible.
 - Do not tune on test.
-- Do not edit code in ../xray_fracture_benchmark/scripts.
-- Do not change datasets, labels, manifests, or split definitions.
-- Stay within the selected runtime tier.
+- Do not edit ../xray_fracture_benchmark/scripts.
+- Do not change datasets, labels, manifests, or splits.
 - In limited mode, stay config-only.
-- In open mode, if existing benchmark methods look exhausted, you may propose benchmark src/ code edits through run_config.code_edits.
-- Open-mode code edits must stay under ../xray_fracture_benchmark/src, be tightly scoped, and be paired with a concrete config experiment.
+- In open mode, benchmark src/ code edits are allowed via run_config.code_edits under ../xray_fracture_benchmark/src only, paired with a concrete run and bounded to one hypothesis.
+- Treat recoverable crashes as repair targets, not negative metric evidence.
+- Matched scores are discard, but they still matter as tie evidence.
+- Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
+- Longer bounded programming work is allowed if it is the cleanest way to test a strong idea.
+- If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
+- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family config-only tweaks. Broaden to a different family, a coherent multi-axis jump, or benchmark src code edits.
+- Do not choose done early. If more than about {done_guard_minutes} minutes remain before {deadline_utc} and meaningful directions still exist, keep searching.
 
-Available wrapper actions:
-- baseline: run run_loop.py baseline --tier {tier}
-- run_config: write one YAML file under generated_configs/, optionally apply a small set of benchmark src/ code edits, and run it with run_loop.py run-config --tier {tier}
-- test: run locked test for a finalist experiment id
-- install_package: install one or more narrowly scoped packages into the benchmark venv
-- download_file: download a file into downloads/
-- done: stop because the overnight goal is complete
-- blocked: stop because of a concrete external blocker
+Search expectations:
+- In open search, actively use web search, including promising ideas from other domains.
+- Broaden if experiment_summary.tsv shows one narrow architecture or hyperparameter basin.
+- Architecture changes, model-family changes, new heads, helper modules, and end-to-end benchmark-side components are valid when justified.
+- Prefer coherent 1-4 change hypotheses, not random bundles.
+- Do not spend the whole run on tiny local retuning unless results clearly justify it.
+- Set the actual budget in config_yaml. Choose epochs, max_train_batches, max_eval_batches, scheduler, and other budget controls based on the method change.
+- State the budget reasoning briefly in `notes` for every baseline or run_config.
+- Longer budgets are expected for heavier changes such as no-pretrain runs, higher resolution, larger backbones, or new code paths when that is methodologically justified.
+
+Actions:
+- baseline
+- run_config
+- test
+- install_package
+- download_file
+- done
+- blocked
+
+run_config must include:
+- action="run_config"
+- label
+- runtime_tier
+- config_path under generated_configs/
+- full config_yaml
+- optional parent_experiment_id
+- optional code_edits with benchmark-repo-relative src/ file paths and full file content
 
 Search-space policy:
 {search_space_text}
 
-Runtime tiers available for this search:
+Runtime tiers:
 {runtime_tier_text}
 
-Budget rule:
-- In open search, active exploration should use the 5m to 30m tiers.
-- In open search, use web search regularly for architecture, loss, optimization, or training ideas instead of staying fully local.
-- Use long only to finalize clearly strong candidates.
-- Compare only against runs from the same runtime tier.
-- Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
-- In open search, architecture and model-family changes are expected exploration axes, not optional extras.
-- In open search, own method ideas are allowed. You may propose small code or math changes inside benchmark src/ when they are data-driven and clearly tied to a hypothesis.
-- Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
-- Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
-- In limited search, prefer one controlled change at a time.
-- In open search, you may propose a compact 2-4 change bundle when it is one coherent hypothesis and clearly faster than scalar-only local search.
-- If you bundle changes, keep them centered on one idea such as architecture + backbone + batch fit, or patch enable + patch settings, not a random grab bag.
-
-Current status output:
+Status:
 {status_output}
 
-Recent results tail:
+Recent results:
 {results_tail}
 
-Experiment summary table:
-{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=8000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
+Experiment summary:
+{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=5000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
 
-Baseline config path:
-{baseline_config_path}
-
-Baseline config text:
+Baseline config:
+- path={baseline_config_path}
+- text:
 {baseline_config_text}
 
-Current best context:
+Current best:
 {best_section}
 
-Output requirements:
-- Return JSON only.
-- Choose exactly one action.
-- For run_config, provide:
-  - action="run_config"
-  - label
-  - runtime_tier
-  - config_path like generated_configs/<slug>.yaml
-  - full config_yaml content
-  - optional parent_experiment_id
-  - optional code_edits as an array of benchmark-repo-relative src/ files with full file content
-- For baseline, provide runtime_tier for the tier you want to establish.
-- For install_package, provide packages as a JSON array.
-- For download_file, provide download_url and download_path under downloads/.
-- Use notes for a short expected outcome or blocker description.
-- Keep changes small and data-driven.
-- In open search, do not complete a whole overnight run without using web search.
-- In open search, a compact hypothesis-driven bundle is allowed when it accelerates exploration.
-- If you use code_edits, keep them tightly scoped and tied to one concrete method hypothesis.
+Return JSON only.
 """
 
 
@@ -525,6 +967,7 @@ def build_resume_prompt(
     repo_root: pathlib.Path,
     tier: str,
     deadline_utc: str,
+    done_guard_minutes: int,
     search_space_name: str,
     runtime_tier_text: str,
     status_output: str,
@@ -538,7 +981,7 @@ def build_resume_prompt(
     if best_context.get("experiment_id"):
         best_section = (
             f"Current best experiment: {best_context['experiment_id']}\n"
-            f"Current best dice_pos: {best_context['metric']}\n"
+            f"Current best {best_context.get('metric_key') or 'metric'}: {best_context['metric']}\n"
             f"Current best config path: {best_context['config_path']}\n"
             f"Current best config text:\n{best_context['config_text'] or '(unavailable)'}"
         )
@@ -548,52 +991,57 @@ def build_resume_prompt(
 
     return f"""Continue the same single-agent research thread in {repo_root}.
 
-Tier: {tier}
-Hard deadline UTC: {deadline_utc}
-Search-space mode: {search_space_name}
+Context:
+- tier={tier}
+- deadline_utc={deadline_utc}
+- search_space={search_space_name}
 
-You still must not execute shell commands directly. Return exactly one JSON action for the wrapper to execute.
+Return exactly one JSON action. Do not execute shell commands directly. The wrapper may auto-repair one failed run_config once.
 
-Runtime tiers available for this search:
-{runtime_tier_text}
-
-Budget rule:
-- Use the 5m to 30m tiers for active search.
-- In open search, use web search regularly for architecture, loss, optimization, or training ideas instead of staying fully local.
-- Use long only to finalize clearly strong candidates.
+Keep these rules active:
+- Optimize the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`.
+- `runtime_tier` is a comparison bucket only, not an automatic time cap. The config itself must define the real training budget.
 - Compare only within the same runtime tier.
-- Use experiment_summary.tsv as an exploration audit. If recent runs stay inside one model family or one narrow hyperparameter basin, broaden again.
-- In open search, architecture and model-family changes are expected exploration axes, not optional extras.
-- In open search, own method ideas are allowed. You may propose small code or math changes inside benchmark src/ when they are data-driven and clearly tied to a hypothesis.
-- Do not spend a whole run only retuning loss weights or learning rate around one architecture unless the results clearly justify it.
-- Do not underuse the GPU. When benchmark-compatible, consider stronger architectures, pretrained backbones, larger inputs, or larger batches that make meaningful use of the available budget.
-- In limited search, prefer one controlled change at a time.
-- In open search, you may propose a compact 2-4 change bundle when it is one coherent hypothesis and clearly faster than scalar-only local search.
-- If you bundle changes, keep them centered on one idea such as architecture + backbone + batch fit, or patch enable + patch settings, not a random grab bag.
-- If you use code_edits, keep them tightly scoped and pair them with a concrete config run.
+- Aim for 2026+ SOTA-level ideas when feasible.
+- Use transdomain transfer when credible.
+- In open search, use web search regularly.
+- Treat recoverable crashes as repair targets.
+- Treat matched scores as ties, not improvements.
+- Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
+- Broaden if the search collapses into one narrow basin.
+- If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
+- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family config-only tweaks. Broaden to a different family, a coherent multi-axis jump, or benchmark src code edits.
+- Benchmark src/ code edits are allowed only under ../xray_fracture_benchmark/src via run_config.code_edits, paired with one concrete hypothesis.
+- Longer bounded programming work is allowed when it is the cleanest path to a strong experiment.
+- Set the actual budget in config_yaml and state the budget reasoning briefly in `notes` for every baseline or run_config.
+- Do not tune on test, edit benchmark scripts, or change datasets/splits.
+- Do not choose done early. If more than about {done_guard_minutes} minutes remain before {deadline_utc} and meaningful directions still exist, keep searching.
+
+Runtime tiers:
+{runtime_tier_text}
 
 Previous cycle summary:
 {previous_cycle_summary or "(none)"}
 
-Previous chosen action:
+Previous action:
 {previous_action_json}
 
-Previous execution result:
+Previous execution:
 {previous_execution_json}
 
-Current status output:
+Status:
 {status_output}
 
-Recent results tail:
+Recent results:
 {results_tail}
 
-Experiment summary table:
-{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=8000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
+Experiment summary:
+{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=5000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
 
-Current best context:
+Current best:
 {best_section}
 
-Return the next single JSON action only.
+Return JSON only.
 """
 
 
@@ -612,6 +1060,7 @@ def call_codex(
     skip_git_repo_check: bool,
     add_dirs: list[pathlib.Path],
     prompt: str,
+    env: dict[str, str],
 ) -> dict[str, Any]:
     io_dir = ensure_dir(logs_dir / "_codex_io")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -660,7 +1109,7 @@ def call_codex(
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ, "CODEX_HOME": str(codex_home)},
+        env=env,
     )
     stdout_path.write_text(proc.stdout or "", encoding="utf-8")
     stderr_path.write_text(proc.stderr or "", encoding="utf-8")
@@ -797,6 +1246,14 @@ def execute_wrapper_action(
     search_space_name: str,
     cycle_index: int,
     logs_dir: pathlib.Path,
+    auto_repair_enabled: bool,
+    auto_repair_retry_on_success: bool,
+    auto_repair_allow_direct_module_install: bool,
+    auto_repair_module_package_map: dict[str, list[str]],
+    auto_repair_module_alias_map: dict[str, list[str]],
+    auto_repair_model_package_map: dict[str, list[str]],
+    auto_repair_model_fallback_map: dict[str, str],
+    runtime_env: dict[str, str],
 ) -> dict[str, Any]:
     kind = str(action["action"])
     run_loop_path = repo_root / "run_loop.py"
@@ -826,16 +1283,47 @@ def execute_wrapper_action(
             "--tier",
             selected_tier,
         ]
-        outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
+        outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path, env=runtime_env)
         outcome.update({"status": "executed", "action": kind, "command": command, "runtime_tier": selected_tier})
         return outcome
 
     if kind == "run_config":
         config_path = normalize_generated_config_path(repo_root, str(action["config_path"]))
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        yaml_text = str(action["config_yaml"]).rstrip() + "\n"
-        config_path.write_text(yaml_text, encoding="utf-8")
+        yaml_text = sanitize_config_yaml_text(str(action["config_yaml"]))
         code_edits = action.get("code_edits", [])
+        proposed_model_name = extract_model_name_from_yaml_text(yaml_text)
+        results_path = resolve_repo_path(repo_root, str(app_cfg["results_file"]))
+        results = load_results_rows(results_path)
+        selection_metric = str(app_cfg["selection_metric"])
+        best_row = current_best_result(results, selected_tier, selection_metric)
+        best_model_name = model_name_from_result_row(repo_root, best_row) if best_row else ""
+        if (
+            search_space_name == "open"
+            and not code_edits
+            and proposed_model_name == "simple_unet"
+            and recent_plain_simple_unet_streak(
+                repo_root=repo_root,
+                results_path=results_path,
+                tier=selected_tier,
+            )
+            >= PLAIN_SIMPLE_UNET_STREAK_LIMIT
+        ):
+            raise RuntimeError(
+                "plain simple_unet search is stuck in this tier; propose a different model family or use benchmark src code_edits"
+            )
+        if (
+            search_space_name == "open"
+            and not code_edits
+            and proposed_model_name
+            and best_model_name
+            and proposed_model_name == best_model_name
+            and recent_non_keep_streak(results_path=results_path, tier=selected_tier) >= 6
+        ):
+            raise RuntimeError(
+                "search plateaued in the current best model family; propose another family, a coherent broader jump, or benchmark src code_edits"
+            )
+        config_path.write_text(yaml_text, encoding="utf-8")
         if code_edits and search_space_name != "open":
             raise RuntimeError("code_edits are allowed only in open search")
 
@@ -858,8 +1346,6 @@ def execute_wrapper_action(
         backups: list[tuple[pathlib.Path, bool, str]] = []
         edited_paths: list[str] = []
         if code_edits:
-            selection_metric = str(app_cfg["selection_metric"])
-            results = load_results_rows(resolve_repo_path(repo_root, str(app_cfg["results_file"])))
             best_row = current_best_result(results, selected_tier, selection_metric)
             current_best_id = str(best_row.get("experiment_id", "")).strip() if best_row else ""
             if current_best_id and parent_experiment_id and parent_experiment_id != current_best_id:
@@ -873,7 +1359,7 @@ def execute_wrapper_action(
                 target_path.write_text(str(edit.get("content", "")), encoding="utf-8")
                 edited_paths.append(rel_or_abs(target_path, benchmark_repo_root))
         try:
-            outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
+            outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path, env=runtime_env)
         except Exception:
             for target_path, existed, original_text in reversed(backups):
                 if existed:
@@ -881,18 +1367,49 @@ def execute_wrapper_action(
                 elif target_path.exists():
                     target_path.unlink()
             raise
+        repair = None
+        retry_outcome = None
+        final_outcome = outcome
+        if (
+            auto_repair_enabled
+            and auto_repair_retry_on_success
+            and int(outcome.get("returncode", 0)) != 0
+        ):
+            repair = attempt_auto_repair(
+                repo_root=repo_root,
+                benchmark_repo_root=benchmark_repo_root,
+                benchmark_python=benchmark_python,
+                command=command,
+                log_path=log_path,
+                logs_dir=logs_dir,
+                label=label,
+                cycle_slug=cycle_slug,
+                auto_repair_enabled=auto_repair_enabled,
+                auto_repair_allow_direct_module_install=auto_repair_allow_direct_module_install,
+                auto_repair_module_package_map=auto_repair_module_package_map,
+                auto_repair_module_alias_map=auto_repair_module_alias_map,
+                auto_repair_model_package_map=auto_repair_model_package_map,
+                auto_repair_model_fallback_map=auto_repair_model_fallback_map,
+                runtime_env=runtime_env,
+            )
+            retry_command = repair.get("retry_command", []) if isinstance(repair, dict) else []
+            if isinstance(retry_command, list) and retry_command:
+                retry_log_path = logs_dir / f"{cycle_slug}_{label}_retry.log"
+                retry_outcome = run_logged_command(cmd=retry_command, cwd=repo_root, log_path=retry_log_path, env=runtime_env)
+                final_outcome = dict(retry_outcome)
+                final_outcome["retry_command"] = retry_command
         if backups:
             results_after = load_results_rows(resolve_repo_path(repo_root, str(app_cfg["results_file"])))
             latest_row = results_after[-1] if results_after else {}
             latest_status = str(latest_row.get("status", "")).strip().lower()
-            keep_code = latest_status in {"keep", "baseline"}
+            keep_code = latest_status in {"keep", "baseline", "candidate"}
             if not keep_code:
                 for target_path, existed, original_text in reversed(backups):
                     if existed:
                         target_path.write_text(original_text, encoding="utf-8")
                     elif target_path.exists():
                         target_path.unlink()
-        outcome.update(
+        final_outcome.update(
             {
                 "status": "executed",
                 "action": kind,
@@ -900,10 +1417,15 @@ def execute_wrapper_action(
                 "config_path": str(config_path),
                 "runtime_tier": selected_tier,
                 "code_edit_paths": edited_paths,
-                "code_edit_retained": bool(backups) and latest_status in {"keep", "baseline"} if backups else False,
+                "code_edit_retained": bool(backups) and latest_status in {"keep", "baseline", "candidate"} if backups else False,
             }
         )
-        return outcome
+        if repair is not None:
+            final_outcome["auto_repair"] = repair
+            final_outcome["initial_outcome"] = outcome
+        if retry_outcome is not None:
+            final_outcome["retry_outcome"] = retry_outcome
+        return final_outcome
 
     if kind == "test":
         experiment_id = str(action["experiment_id"]).strip()
@@ -915,7 +1437,7 @@ def execute_wrapper_action(
             "--experiment-id",
             experiment_id,
         ]
-        outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path)
+        outcome = run_logged_command(cmd=command, cwd=repo_root, log_path=log_path, env=runtime_env)
         outcome.update({"status": "executed", "action": kind, "command": command})
         return outcome
 
@@ -923,7 +1445,7 @@ def execute_wrapper_action(
         packages = [str(item).strip() for item in action.get("packages", []) if str(item).strip()]
         log_path = logs_dir / f"{cycle_slug}.log"
         command = [str(benchmark_python), "-m", "pip", "install", *packages]
-        outcome = run_logged_command(cmd=command, cwd=benchmark_repo_root, log_path=log_path)
+        outcome = run_logged_command(cmd=command, cwd=benchmark_repo_root, log_path=log_path, env=runtime_env)
         outcome.update({"status": "executed", "action": kind, "command": command, "packages": packages})
         return outcome
 
@@ -954,9 +1476,10 @@ def collect_status_snapshot(
     *,
     repo_root: pathlib.Path,
     controller_python: pathlib.Path,
+    env: dict[str, str],
 ) -> str:
     cmd = [str(controller_python), str(repo_root / "run_loop.py"), "status", "--limit", "8"]
-    rc, output = run_capture(cmd=cmd, cwd=repo_root)
+    rc, output = run_capture(cmd=cmd, cwd=repo_root, env=env)
     if rc == 0:
         return output or "status produced no output"
     return f"status command failed rc={rc}\n{output}"
@@ -981,8 +1504,28 @@ def main() -> int:
     results_path = resolve_repo_path(repo_root, str(app_cfg["results_file"]))
     logs_dir = ensure_dir(resolve_repo_path(repo_root, str(app_cfg["logs_dir"])))
     ensure_dir(repo_root / "downloads")
+    auto_repair_enabled = bool(loop_cfg.get("auto_repair_enabled", True))
+    auto_repair_retry_on_success = bool(loop_cfg.get("auto_repair_retry_on_success", True))
+    auto_repair_allow_direct_module_install = bool(loop_cfg.get("auto_repair_allow_direct_module_install", True))
+    auto_repair_module_package_map = normalize_package_map(
+        loop_cfg.get("auto_repair_module_package_map"),
+        DEFAULT_AUTO_REPAIR_MODULE_PACKAGE_MAP,
+    )
+    auto_repair_module_alias_map = normalize_package_map(
+        loop_cfg.get("auto_repair_module_alias_map"),
+        DEFAULT_AUTO_REPAIR_MODULE_ALIAS_MAP,
+    )
+    auto_repair_model_package_map = normalize_package_map(
+        loop_cfg.get("auto_repair_model_package_map"),
+        DEFAULT_AUTO_REPAIR_MODEL_PACKAGE_MAP,
+    )
+    auto_repair_model_fallback_map = normalize_fallback_map(
+        loop_cfg.get("auto_repair_model_fallback_map"),
+        DEFAULT_AUTO_REPAIR_MODEL_FALLBACK_MAP,
+    )
 
     codex_home = ensure_dir(resolve_repo_path(repo_root, str(loop_cfg["codex_home_dir"])))
+    runtime_env = build_runtime_env(repo_root, loop_cfg, codex_home=codex_home)
     thread_id_file = resolve_repo_path(repo_root, str(loop_cfg["thread_id_file"]))
     session_state_file = resolve_repo_path(repo_root, str(loop_cfg["session_state_file"]))
     stop_flag_file = resolve_repo_path(repo_root, str(loop_cfg["stop_flag_file"]))
@@ -1007,12 +1550,13 @@ def main() -> int:
     session_log = logs_dir / f"codex_loop_{args.tier}_{session_stamp}.log"
 
     metric_key = str(app_cfg["selection_metric"])
+    done_guard_minutes = int(loop_cfg.get("done_allowed_within_minutes", 30))
     allowed_runtime_tiers = list_allowed_runtime_tiers(loop_cfg, args.search_space, app_cfg)
     runtime_tier_text = runtime_tier_summary(app_cfg, allowed_runtime_tiers)
     baseline_config_path = benchmark_baseline_config_path(repo_root, app_cfg, benchmark_repo_root)
-    baseline_config_text = read_text_limited(baseline_config_path, max_chars=12000)
+    baseline_config_text = read_text_limited(baseline_config_path, max_chars=6000)
     search_space_text = read_text_limited(search_space_doc, max_chars=8000)
-    status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python)
+    status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python, env=runtime_env)
     best_context = extract_best_config_context(
         repo_root=repo_root,
         results_path=results_path,
@@ -1035,6 +1579,8 @@ def main() -> int:
         "controller_python_exe": str(controller_python),
         "benchmark_python_exe": str(benchmark_python),
         "benchmark_repo_root": str(benchmark_repo_root),
+        "auto_repair_enabled": auto_repair_enabled,
+        "runtime_env_overrides": loop_cfg.get("runtime_env", {}),
         "session_log": str(session_log),
         "cycles": [],
     }
@@ -1046,6 +1592,7 @@ def main() -> int:
         benchmark_python=benchmark_python,
         tier=args.tier,
         deadline_utc=deadline_utc,
+        done_guard_minutes=done_guard_minutes,
         search_space_name=args.search_space,
         search_space_text=search_space_text,
         runtime_tier_text=runtime_tier_text,
@@ -1065,7 +1612,7 @@ def main() -> int:
         cwd=str(repo_root),
         capture_output=True,
         text=True,
-        env={**os.environ, "CODEX_HOME": str(codex_home)},
+        env=runtime_env,
     )
     if login_probe.returncode != 0:
         sys.stderr.write(f"Codex is not logged in for CODEX_HOME={codex_home}\n")
@@ -1100,12 +1647,22 @@ def main() -> int:
                 skip_git_repo_check=bool(loop_cfg.get("skip_git_repo_check", False)),
                 add_dirs=[benchmark_repo_root, benchmark_python.parent.parent],
                 prompt=prompt,
+                env=runtime_env,
             )
             action = coerce_action(codex_result["action_payload"])
             issues = validate_action(action)
+            issues.extend(
+                validate_action_policy(
+                    action=action,
+                    search_space_name=args.search_space,
+                    deadline=deadline,
+                    done_allowed_within_minutes=done_guard_minutes,
+                    stop_flag_exists=stop_flag_file.exists(),
+                )
+            )
             if issues:
                 execution: dict[str, Any] = {
-                    "status": "blocked",
+                    "status": "rejected",
                     "message": "action validation failed: " + ", ".join(issues),
                 }
             else:
@@ -1121,6 +1678,14 @@ def main() -> int:
                         search_space_name=args.search_space,
                         cycle_index=cycle,
                         logs_dir=logs_dir,
+                        auto_repair_enabled=auto_repair_enabled,
+                        auto_repair_retry_on_success=auto_repair_retry_on_success,
+                        auto_repair_allow_direct_module_install=auto_repair_allow_direct_module_install,
+                        auto_repair_module_package_map=auto_repair_module_package_map,
+                        auto_repair_module_alias_map=auto_repair_module_alias_map,
+                        auto_repair_model_package_map=auto_repair_model_package_map,
+                        auto_repair_model_fallback_map=auto_repair_model_fallback_map,
+                        runtime_env=runtime_env,
                     )
                 except Exception as exc:
                     execution = {
@@ -1151,7 +1716,7 @@ def main() -> int:
                 "telemetry": {},
             }
 
-        status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python)
+        status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python, env=runtime_env)
         best_context = extract_best_config_context(
             repo_root=repo_root,
             results_path=results_path,
@@ -1184,7 +1749,7 @@ def main() -> int:
             handle.write(json.dumps(cycle_record, ensure_ascii=True) + "\n")
 
         terminal_status = str(execution.get("status", "")).strip().lower()
-        if action["action"] in {"done", "blocked"}:
+        if action["action"] in {"done", "blocked"} and terminal_status != "rejected":
             break
         if terminal_status == "blocked":
             break
@@ -1193,6 +1758,7 @@ def main() -> int:
             repo_root=repo_root,
             tier=args.tier,
             deadline_utc=deadline_utc,
+            done_guard_minutes=done_guard_minutes,
             search_space_name=args.search_space,
             runtime_tier_text=runtime_tier_text,
             status_output=status_output,

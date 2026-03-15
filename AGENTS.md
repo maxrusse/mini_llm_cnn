@@ -2,13 +2,14 @@
 
 ## Mission and Scope
 - Build a minimal autonomous research loop for `xray_fracture_benchmark`.
-- Optimize validation `dice_pos` through config-first experimentation, with optional open-mode method/code experiments when config-only search looks too narrow.
+- Optimize the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos` through config-first experimentation, with optional open-mode method/code experiments when config-only search looks too narrow.
 - Keep the mini loop lightweight, reproducible, and easy for a single Codex agent to operate.
 
 ## Hard Constraints and Safety Boundaries
 - Do not edit code inside `../xray_fracture_benchmark/scripts`.
 - In `limited` mode, stay config-only.
-- In `open` mode, tightly scoped code edits under `../xray_fracture_benchmark/src` are allowed only through the wrapper-owned `run_config.code_edits` path.
+- In `open` mode, benchmark code edits under `../xray_fracture_benchmark/src` are allowed only through the wrapper-owned `run_config.code_edits` path.
+- Open-mode code edits may range from small targeted fixes to larger benchmark-side implementations such as new helper functions, new heads, new model classes, or end-to-end training/pipeline components when they are the most feasible way to test a concrete method idea.
 - Code edits must stay data-driven, tied to one concrete hypothesis, and paired with a real config run.
 - The wrapper currently supports hill-climbing code edits on top of the current kept best for a tier; do not assume arbitrary branching between old code states.
 - Do not tune on `test`; locked test evaluation is explicit and finalist-only.
@@ -21,8 +22,10 @@
 - Downloading pretrained weights or papers is allowed; downloading new training datasets is out of scope.
 
 ## Data and Evaluation Policy
-- Primary selection metric is validation `dice_pos`.
+- Primary selection stack is validation `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`.
 - Compare only runs produced with the same runtime tier.
+- `runtime_tier` is a comparison bucket only. Actual training budget must be declared in the config for each run.
+- Use `medium` as the main exploration/evaluation bucket and `long` for final tie-down of the strongest candidates, not as hardcoded training-time presets.
 - Test evaluation is allowed only for a kept or baseline experiment and must use the run's resolved config.
 - Do not modify dataset manifests, split files, or threshold-selection policy in the benchmark repo.
 
@@ -30,6 +33,9 @@
 - Keep the loop config-driven and deterministic where possible.
 - Log every attempted experiment to `results.tsv`.
 - Each run must preserve its generated config, logs, checkpoint path, and validation metrics path.
+- For each baseline or candidate run, the agent should state the expected runtime and why that budget matches the method change.
+- Near-best runs within the configured noise band should be retained as `candidate` so faster or otherwise attractive alternatives remain available for finalist comparison.
+- If several cycles plateau without a new keep, the search should broaden to another family, a coherent multi-axis jump, or benchmark `src/` code edits instead of continuing same-family config-only micro-tuning.
 - If the loop behavior or CLI changes, update `README.md` and `program.md`.
 - Keep Codex loop state minimal: one repo-local `CODEX_HOME`, one thread id file, one session state file, and log files.
 

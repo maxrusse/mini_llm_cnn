@@ -85,6 +85,7 @@ SUMMARY_FIELDS = [
     "notes",
 ]
 KEEP_STATUSES = {"baseline", "keep"}
+TESTABLE_STATUSES = {"baseline", "keep", "candidate"}
 
 
 class LoopError(RuntimeError):
@@ -142,6 +143,164 @@ def slugify(text: str) -> str:
     return out or "candidate"
 
 
+def append_note(base_note: str, extra_note: str) -> str:
+    base = str(base_note).strip().strip(";")
+    extra = str(extra_note).strip().strip(";")
+    if not extra:
+        return base
+    if not base:
+        return extra
+    return f"{base}; {extra}"
+
+
+def selection_metric_priority(settings: dict[str, Any]) -> list[str]:
+    configured = settings.get("selection_metric_priority", [])
+    metric_keys: list[str] = []
+    if isinstance(configured, list):
+        for item in configured:
+            key = str(item).strip()
+            if key and key not in metric_keys:
+                metric_keys.append(key)
+    primary = str(settings.get("selection_metric", "roc_auc_presence")).strip()
+    if primary and primary not in metric_keys:
+        metric_keys.insert(0, primary)
+    return metric_keys or ["roc_auc_presence"]
+
+
+def metric_stack_label(metric_keys: list[str]) -> str:
+    return " > ".join(metric_keys)
+
+
+def load_metric_bundle(metrics_path: pathlib.Path, metric_keys: list[str]) -> dict[str, float]:
+    metrics = load_json(metrics_path, None)
+    if not isinstance(metrics, dict):
+        raise LoopError(f"Invalid metrics JSON: {metrics_path}")
+    out: dict[str, float] = {}
+    for key in metric_keys:
+        if key not in metrics:
+            raise LoopError(f"Missing metric '{key}' in {metrics_path}")
+        value = float(metrics[key])
+        if math.isnan(value):
+            raise LoopError(f"Metric '{key}' is NaN in {metrics_path}")
+        out[key] = value
+    return out
+
+
+def compare_metric_priority(
+    current: dict[str, float],
+    reference: dict[str, float],
+    metric_keys: list[str],
+    epsilon: float,
+) -> tuple[int, str]:
+    for key in metric_keys:
+        lhs = float(current[key])
+        rhs = float(reference[key])
+        if lhs > rhs + epsilon:
+            return 1, key
+        if lhs < rhs - epsilon:
+            return -1, key
+    return 0, metric_keys[0] if metric_keys else ""
+
+
+def metrics_path_for_result_row(row: dict[str, str]) -> pathlib.Path | None:
+    checkpoint_txt = str(row.get("checkpoint_path", "")).strip()
+    if checkpoint_txt:
+        checkpoint_path = resolve_from_repo(checkpoint_txt)
+        return checkpoint_path.parent / "validate_metrics.json"
+    resolved_cfg_txt = str(row.get("resolved_config_path", "")).strip()
+    if resolved_cfg_txt:
+        resolved_cfg_path = resolve_from_repo(resolved_cfg_txt)
+        return resolved_cfg_path.parent / "validate_metrics.json"
+    return None
+
+
+def annotate_metric_outcome_note(
+    *,
+    note: str,
+    selection_metric: str,
+    metric_value: float,
+    prior_best: dict[str, str] | None,
+    epsilon: float,
+) -> str:
+    if prior_best is None:
+        return note
+    best_id = str(prior_best.get("experiment_id", "")).strip() or "current_best"
+    try:
+        best_value = float(prior_best.get("val_metric_value", "nan"))
+    except Exception:
+        return append_note(note, f"did not improve over {best_id}")
+    if math.isclose(metric_value, best_value, rel_tol=0.0, abs_tol=epsilon):
+        return append_note(
+            note,
+            f"matched current best {best_id} {selection_metric}={best_value:.6f}",
+        )
+    return append_note(
+        note,
+        f"did not improve over {best_id} {selection_metric}={best_value:.6f}",
+    )
+
+
+def annotate_ranked_outcome_note(
+    *,
+    note: str,
+    primary_metric: str,
+    metric_keys: list[str],
+    prior_best: dict[str, str] | None,
+    prior_metrics: dict[str, float] | None,
+    comparison: int,
+) -> str:
+    if prior_best is None or prior_metrics is None:
+        return note
+    best_id = str(prior_best.get("experiment_id", "")).strip() or "current_best"
+    primary_best = float(prior_metrics[primary_metric])
+    if comparison == 0:
+        return append_note(
+            note,
+            f"matched current best {best_id} on metric stack {metric_stack_label(metric_keys)}; "
+            f"{primary_metric}={primary_best:.6f}",
+        )
+    return append_note(
+        note,
+        f"did not improve over {best_id} on metric stack {metric_stack_label(metric_keys)}; "
+        f"{primary_metric}={primary_best:.6f}",
+    )
+
+
+def is_near_best_candidate(
+    current: dict[str, float],
+    reference: dict[str, float],
+    metric_keys: list[str],
+    candidate_epsilon: float,
+) -> bool:
+    if candidate_epsilon <= 0.0 or not metric_keys:
+        return False
+    primary = metric_keys[0]
+    current_primary = float(current[primary])
+    reference_primary = float(reference[primary])
+    if current_primary + candidate_epsilon < reference_primary:
+        return False
+    return True
+
+
+def annotate_candidate_outcome_note(
+    *,
+    note: str,
+    primary_metric: str,
+    prior_best: dict[str, str] | None,
+    prior_metrics: dict[str, float] | None,
+    candidate_epsilon: float,
+) -> str:
+    if prior_best is None or prior_metrics is None:
+        return note
+    best_id = str(prior_best.get("experiment_id", "")).strip() or "current_best"
+    best_value = float(prior_metrics[primary_metric])
+    return append_note(
+        note,
+        f"near-best candidate within noise band {candidate_epsilon:.6f} of {best_id}; "
+        f"{primary_metric}={best_value:.6f}",
+    )
+
+
 def rel_or_abs(path: pathlib.Path) -> str:
     try:
         return str(path.relative_to(REPO_ROOT))
@@ -160,6 +319,7 @@ def parse_args() -> argparse.Namespace:
 
     baseline = sub.add_parser("baseline", help="Run baseline for a tier.")
     baseline.add_argument("--tier", default="")
+    baseline.add_argument("--note-suffix", default="")
     baseline.add_argument("--dry-run", action="store_true")
 
     step = sub.add_parser("step", help="Create and run the next auto mutation.")
@@ -172,6 +332,7 @@ def parse_args() -> argparse.Namespace:
     run_config.add_argument("--tier", default="")
     run_config.add_argument("--label", default="manual")
     run_config.add_argument("--parent-experiment-id", default="")
+    run_config.add_argument("--note-suffix", default="")
     run_config.add_argument("--dry-run", action="store_true")
 
     night = sub.add_parser("night-run", help="Run repeated auto steps for a fixed number of hours.")
@@ -390,23 +551,45 @@ def mutation_history_for_parent(state: dict[str, Any], parent_experiment_id: str
     return out
 
 
-def current_best_result(results: list[dict[str, str]], tier: str, selection_metric: str) -> dict[str, str] | None:
+def current_best_result(
+    results: list[dict[str, str]],
+    tier: str,
+    selection_metric: str,
+    *,
+    metric_keys: list[str] | None = None,
+) -> dict[str, str] | None:
     best_row = None
-    best_val = float("-inf")
+    best_metrics: dict[str, float] | None = None
+    metric_stack = metric_keys or [selection_metric]
     for row in results:
         if row.get("runtime_tier") != tier:
             continue
         if row.get("status") not in KEEP_STATUSES:
             continue
-        if row.get("val_metric_key") != selection_metric:
-            continue
         try:
-            score = float(row.get("val_metric_value", "nan"))
-        except ValueError:
-            continue
-        if score > best_val:
+            metrics_path = metrics_path_for_result_row(row)
+            if metrics_path is None or not metrics_path.exists():
+                raise LoopError("missing validate metrics")
+            row_metrics = load_metric_bundle(metrics_path, metric_stack)
+        except Exception:
+            if row.get("val_metric_key") != selection_metric:
+                continue
+            try:
+                fallback_value = float(row.get("val_metric_value", "nan"))
+            except ValueError:
+                continue
+            if math.isnan(fallback_value):
+                continue
+            row_metrics = {selection_metric: fallback_value}
+            metric_stack = [selection_metric]
+        if best_metrics is None:
             best_row = row
-            best_val = score
+            best_metrics = row_metrics
+            continue
+        comparison, _ = compare_metric_priority(row_metrics, best_metrics, list(row_metrics.keys()), 0.0)
+        if comparison > 0:
+            best_row = row
+            best_metrics = row_metrics
     return best_row
 
 
@@ -418,7 +601,12 @@ def load_parent_config(
     bench_root: pathlib.Path,
 ) -> tuple[dict[str, Any], str, pathlib.Path]:
     selection_metric = str(settings["selection_metric"])
-    best_row = current_best_result(results, tier, selection_metric)
+    best_row = current_best_result(
+        results,
+        tier,
+        selection_metric,
+        metric_keys=selection_metric_priority(settings),
+    )
     if best_row is not None:
         config_path = resolve_from_repo(best_row["config_path"])
         return load_yaml(config_path), best_row["experiment_id"], config_path
@@ -434,12 +622,9 @@ def runtime_tier_name(args_tier: str, settings: dict[str, Any]) -> str:
 
 
 def apply_runtime_tier(config: dict[str, Any], settings: dict[str, Any], tier: str) -> dict[str, Any]:
-    tier_spec = settings["runtime_tiers"][tier]
-    if isinstance(tier_spec, dict) and isinstance(tier_spec.get("overrides"), dict):
-        overrides = tier_spec["overrides"]
-    else:
-        overrides = tier_spec
-    return deep_merge(config, overrides)
+    _ = settings
+    _ = tier
+    return copy.deepcopy(config)
 
 
 MutationFn = Callable[[dict[str, Any]], tuple[dict[str, Any], str]]
@@ -452,7 +637,7 @@ def _round_sig(value: float) -> float:
 def ensure_search_defaults(config: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(config)
     training = out.setdefault("training", {})
-    training["selection_metric"] = "dice_pos"
+    training["selection_metric"] = "roc_auc_presence"
     out.setdefault("runtime", {}).setdefault("amp", True)
     out["runtime"].setdefault("device", "cuda")
     return out
@@ -467,6 +652,12 @@ def ensure_patch_cfg(config: dict[str, Any]) -> dict[str, Any]:
     patch_cfg.setdefault("positive_prob", 0.90)
     patch_cfg.setdefault("hard_negative_prob", 0.50)
     patch_cfg.setdefault("hard_negative_quantile", 0.92)
+    return out
+
+
+def apply_selection_metric(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(config)
+    out.setdefault("training", {})["selection_metric"] = str(settings["selection_metric"])
     return out
 
 
@@ -814,15 +1005,7 @@ def write_candidate_config(
 
 
 def validate_metric(metrics_path: pathlib.Path, metric_key: str) -> float:
-    metrics = load_json(metrics_path, None)
-    if not isinstance(metrics, dict):
-        raise LoopError(f"Invalid metrics JSON: {metrics_path}")
-    if metric_key not in metrics:
-        raise LoopError(f"Missing metric '{metric_key}' in {metrics_path}")
-    value = float(metrics[metric_key])
-    if math.isnan(value):
-        raise LoopError(f"Metric '{metric_key}' is NaN in {metrics_path}")
-    return value
+    return load_metric_bundle(metrics_path, [metric_key])[metric_key]
 
 
 def execute_experiment(
@@ -845,7 +1028,9 @@ def execute_experiment(
     runs_dir = paths["runs_dir"]
     results_path = paths["results_file"]
     selection_metric = str(settings["selection_metric"])
+    metric_keys = selection_metric_priority(settings)
     epsilon = float(settings.get("keep_improvement_epsilon", 1e-6))
+    candidate_epsilon = float(settings.get("candidate_metric_epsilon", 0.0))
 
     run_dir = runs_dir / experiment_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -896,21 +1081,60 @@ def execute_experiment(
                 status = "crash"
                 note = f"{note}; validate failed".strip("; ")
             else:
-                metric_value = validate_metric(metrics_path, selection_metric)
+                metric_bundle = load_metric_bundle(metrics_path, metric_keys)
+                metric_value = float(metric_bundle[selection_metric])
                 metric_value_txt = f"{metric_value:.6f}"
-                prior_best = current_best_result(read_results(results_path), tier, selection_metric)
+                prior_best = current_best_result(
+                    read_results(results_path),
+                    tier,
+                    selection_metric,
+                    metric_keys=metric_keys,
+                )
+                prior_metrics = None
                 keep = keep_on_first
                 if prior_best is not None:
-                    keep = metric_value > (float(prior_best["val_metric_value"]) + epsilon)
+                    prior_metrics_path = metrics_path_for_result_row(prior_best)
+                    if prior_metrics_path is None or not prior_metrics_path.exists():
+                        raise LoopError(
+                            f"Missing validate_metrics.json for current best {prior_best.get('experiment_id', '')}"
+                        )
+                    prior_metrics = load_metric_bundle(prior_metrics_path, metric_keys)
+                    comparison, _ = compare_metric_priority(metric_bundle, prior_metrics, metric_keys, epsilon)
+                    keep = comparison > 0
                 if keep_on_first and prior_best is None:
                     status = "baseline"
                 else:
-                    status = "keep" if keep else "discard"
+                    if keep:
+                        status = "keep"
+                    elif prior_best is not None and prior_metrics is not None and is_near_best_candidate(
+                        metric_bundle,
+                        prior_metrics,
+                        metric_keys,
+                        candidate_epsilon,
+                    ):
+                        status = "candidate"
+                        note = annotate_candidate_outcome_note(
+                            note=note,
+                            primary_metric=selection_metric,
+                            prior_best=prior_best,
+                            prior_metrics=prior_metrics,
+                            candidate_epsilon=candidate_epsilon,
+                        )
+                    else:
+                        status = "discard"
+                        note = annotate_ranked_outcome_note(
+                            note=note,
+                            primary_metric=selection_metric,
+                            metric_keys=metric_keys,
+                            prior_best=prior_best,
+                            prior_metrics=prior_metrics,
+                            comparison=comparison if prior_best is not None else 0,
+                        )
     elif dry_run:
         status = "dry_run"
         metric_value_txt = ""
     else:
-        note = f"{note}; train failed rc={train_rc}".strip("; ")
+        note = append_note(note, f"train failed rc={train_rc}")
 
     row = {
         "experiment_id": experiment_id,
@@ -981,18 +1205,29 @@ def print_status(settings: dict[str, Any], paths: dict[str, pathlib.Path], limit
     return 0
 
 
-def do_baseline(settings: dict[str, Any], paths: dict[str, pathlib.Path], tier: str, dry_run: bool) -> int:
+def do_baseline(
+    settings: dict[str, Any],
+    paths: dict[str, pathlib.Path],
+    tier: str,
+    dry_run: bool,
+    note_suffix: str = "",
+) -> int:
     ensure_results_header(paths["results_file"])
     state = load_state(paths["state_file"])
     results = read_results(paths["results_file"], create=True)
-    if current_best_result(results, tier, str(settings["selection_metric"])) is not None:
+    if current_best_result(
+        results,
+        tier,
+        str(settings["selection_metric"]),
+        metric_keys=selection_metric_priority(settings),
+    ) is not None:
         raise LoopError(f"Baseline already exists for tier '{tier}'. Use step or run-config.")
     bench_root = paths["benchmark_repo_root"]
     experiment_id = make_experiment_id(state)
     base_cfg = load_yaml(benchmark_config_path(settings, bench_root))
-    tier_cfg = apply_runtime_tier(base_cfg, settings, tier)
+    tier_cfg = apply_selection_metric(apply_runtime_tier(base_cfg, settings, tier), settings)
     label = "baseline"
-    note = f"baseline from {settings['baseline_config']}"
+    note = append_note(f"baseline from {settings['baseline_config']}", note_suffix)
     config_path = write_candidate_config(
         experiment_id=experiment_id,
         label=label,
@@ -1030,7 +1265,7 @@ def do_step(settings: dict[str, Any], paths: dict[str, pathlib.Path], tier: str,
     used = mutation_history_for_parent(state, parent_id, tier)
     mutation_name = resolve_mutation_label(requested=requested_mutation, parent_config=parent_cfg, already_used=used)
     mutated_cfg, description = MUTATION_LIBRARY[mutation_name](parent_cfg)
-    tier_cfg = apply_runtime_tier(mutated_cfg, settings, tier)
+    tier_cfg = apply_selection_metric(apply_runtime_tier(mutated_cfg, settings, tier), settings)
     experiment_id = make_experiment_id(state)
     label = mutation_name
     note = f"{description}; parent={parent_id}"
@@ -1068,11 +1303,17 @@ def do_run_config(
     label: str,
     parent_experiment_id: str,
     dry_run: bool,
+    note_suffix: str = "",
 ) -> int:
     ensure_results_header(paths["results_file"])
     state = load_state(paths["state_file"])
     results = read_results(paths["results_file"], create=True)
-    if current_best_result(results, tier, str(settings["selection_metric"])) is None:
+    if current_best_result(
+        results,
+        tier,
+        str(settings["selection_metric"]),
+        metric_keys=selection_metric_priority(settings),
+    ) is None:
         raise LoopError(f"No baseline for tier '{tier}'. Run baseline first.")
     raw_path = pathlib.Path(config_arg)
     if raw_path.is_absolute():
@@ -1082,7 +1323,7 @@ def do_run_config(
     if not candidate_path.exists():
         raise LoopError(f"Config does not exist: {candidate_path}")
     candidate_cfg = load_yaml(candidate_path)
-    candidate_cfg = apply_runtime_tier(candidate_cfg, settings, tier)
+    candidate_cfg = apply_selection_metric(apply_runtime_tier(candidate_cfg, settings, tier), settings)
     experiment_id = make_experiment_id(state)
     generated_path = write_candidate_config(
         experiment_id=experiment_id,
@@ -1091,7 +1332,7 @@ def do_run_config(
         generated_dir=paths["generated_config_dir"],
         tier=tier,
     )
-    note = f"manual config from {candidate_path.name}"
+    note = append_note(f"manual config from {candidate_path.name}", note_suffix)
     row = execute_experiment(
         experiment_id=experiment_id,
         parent_experiment_id=parent_experiment_id,
@@ -1134,7 +1375,12 @@ def do_night_run(
     append_night_log(night_log, f"start tier={tier} hours={hours} dry_run={dry_run}")
 
     results = read_results(paths["results_file"])
-    if current_best_result(results, tier, str(settings["selection_metric"])) is None:
+    if current_best_result(
+        results,
+        tier,
+        str(settings["selection_metric"]),
+        metric_keys=selection_metric_priority(settings),
+    ) is None:
         append_night_log(night_log, f"baseline missing for tier={tier}; running baseline")
         do_baseline(settings, paths, tier, dry_run)
     else:
@@ -1167,8 +1413,8 @@ def do_test(settings: dict[str, Any], paths: dict[str, pathlib.Path], experiment
             row = item
     if row is None:
         raise LoopError(f"Unknown experiment id: {experiment_id}")
-    if row.get("status") not in KEEP_STATUSES:
-        raise LoopError(f"Locked test is only allowed for kept or baseline runs: {experiment_id}")
+    if row.get("status") not in TESTABLE_STATUSES:
+        raise LoopError(f"Locked test is only allowed for kept, candidate, or baseline runs: {experiment_id}")
 
     state = load_state(paths["state_file"])
     bench_root = paths["benchmark_repo_root"]
@@ -1215,7 +1461,13 @@ def main() -> int:
                 print(name)
             return 0
         if args.command == "baseline":
-            return do_baseline(settings, paths, runtime_tier_name(args.tier, settings), bool(args.dry_run))
+            return do_baseline(
+                settings,
+                paths,
+                runtime_tier_name(args.tier, settings),
+                bool(args.dry_run),
+                str(args.note_suffix),
+            )
         if args.command == "step":
             return do_step(
                 settings,
@@ -1233,6 +1485,7 @@ def main() -> int:
                 str(args.label),
                 str(args.parent_experiment_id),
                 bool(args.dry_run),
+                str(args.note_suffix),
             )
         if args.command == "night-run":
             return do_night_run(

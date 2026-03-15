@@ -9,13 +9,15 @@ It is designed to be much simpler than `llm_driven_cnns`: a single Codex agent o
 - uses a resumed `codex exec` session as the search agent
 - lets Codex choose one structured action per cycle while the local wrapper executes it
 - primarily searches by changing YAML configs
-- can also test tightly scoped benchmark `src/` code ideas in `open` mode
-- selects candidates by validation `dice_pos`
-- lets open search choose between real 5m, 10m, 20m, and 30m screening tiers
+- can also test benchmark `src/` code ideas in `open` mode, from small helper changes up to new heads, model classes, or pipeline components
+- can auto-repair one failed `run_config` cycle by installing mapped packages or retrying with a configured model-name fallback
+- selects candidates by the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`
+- uses `runtime_tier` as a comparison bucket only; actual training budget is set per experiment in the config itself
 - expects open search to actually use web search for outside ideas
+- explicitly allows importing strong methods from other domains when the transfer case to fracture segmentation is plausible
 - lets open search use a small coherent bundle of changes when that is faster than one-scalar-at-a-time search
-- reserves `long` for finalist runs up to about 2 hours
 - supports unattended overnight search
+- keeps Torch, Hugging Face, pip, and temp caches under `.mini_loop/` by default so model downloads and temp files stay inside the repo workspace
 
 ## What It Does Not Do
 - it does not edit benchmark runner scripts automatically or arbitrarily
@@ -36,12 +38,11 @@ From this repo root:
 - `limited`: narrower, more conservative search
 
 ## Runtime Tiers
-- `medium_5m`: short screening run, about 5 minutes
-- `medium`: default search tier, about 10 minutes
-- `medium_20m`: slower follow-up search tier, about 20 minutes
-- `medium_30m`: heavier search tier, about 30 minutes
-- `long`: finalist tier, up to about 2 hours
-- `smoke`: debug-only sanity tier
+- `smoke`: debug-only comparison bucket
+- `medium`: main exploration and evaluation bucket
+- `long`: final tie-down bucket for strongest candidates
+
+These are bookkeeping buckets for fair comparison, not hidden epoch or batch presets. The actual training budget must be stated in each experiment config and justified by the model.
 
 Launchers:
 
@@ -56,8 +57,9 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 ## Main Files
 - `run_loop.py`: main loop entrypoint
 - `scripts/codex_loop.py`: action-wrapper that resumes one Codex thread and executes chosen actions
-- `config.json`: interpreter paths, benchmark paths, runtime tiers
+- `config.json`: interpreter paths, benchmark paths, comparison-bucket labels
 - `config/codex_loop.json`: Codex model and loop settings
+  - includes wrapper auto-repair maps for missing modules and unsupported model aliases
 - `program.md`: agent operating instructions
 - `search_space_open.md`: open search policy
 - `search_space_limited.md`: limited search policy
@@ -72,11 +74,19 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - `.mini_loop/codex_home/`: repo-local Codex login state
 - `.mini_loop/codex_session.json`: current Codex loop session state
 - `downloads/`: optional downloaded papers or weights
+- `.mini_loop/autofix_configs/`: wrapper-generated retry configs when model-name fallback is applied
 
 ## Rules
 - baseline first
 - compare only within the same runtime tier
-- `keep` only when validation `dice_pos` improves
+- runtime tiers are comparison buckets only; the wrapper no longer injects legacy time-based epoch or batch caps
+- each baseline or candidate run should state its own expected runtime and budget reasoning
+- `medium` is the main exploration/evaluation bucket, while `long` is for final tie-down of the strongest candidates rather than a preset training length
+- `keep` only when the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos` improves
+- near-best runs within the configured noise band are retained as `candidate` instead of being discarded outright, so faster or otherwise attractive alternatives stay visible for finalist selection
+- recoverable crashes should trigger repair work when the direction still looks promising; they are not the same as measured negative results
+- matched scores stay `discard`, but should remain visible and be noted explicitly as ties in the ledger
+- when a tier plateaus for several cycles without a new keep, the loop should broaden rather than keep making same-family config-only tweaks
 - run locked test only on selected kept or baseline experiments
 - create `.mini_loop/STOP_CODEX_LOOP` if you want the loop to stop after the current cycle
 
