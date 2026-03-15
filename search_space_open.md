@@ -52,7 +52,9 @@ Open search-space policy for `mini_llm_cnn` night runs.
 - Weak directions should be discarded instead of being pursued on intuition alone.
 - Recoverable crashes are not weak metric evidence. If a direction fails because of a missing dependency, unsupported config surface, or bounded benchmark implementation gap, prefer repairing the path before abandoning the idea.
 - If one parent is clearly stronger, search locally around that parent; if local search goes flat, broaden again.
-- If a tier has plateaued for several cycles without a new keep, do not keep proposing same-family config-only tweaks. Broaden to a different family, a coherent multi-axis jump, or benchmark `src/` code edits.
+- If a tier has plateaued for several cycles without a new keep, do not keep proposing same-family micro-tweaks. Broaden to a different family, a coherent same-family broad jump, or benchmark `src/` code edits.
+- A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
+- Wrapper policy rejections are feedback, not terminal blockers. Use them to redirect the next proposal.
 - Added complexity must be justified by evidence. More heads, more sampling logic, or more structure only when results support it.
 - Open search should mix breadth and depth: first establish a reasonable spread of architectures and training regimes, then exploit the strongest basin.
 - Before moving to `long`, there should usually be evidence that more than one architecture or model direction was considered, unless the benchmark support makes that impossible.

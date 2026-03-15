@@ -7,6 +7,7 @@ Limited search-space policy for `mini_llm_cnn` night runs.
 - Compare only within the same runtime tier.
 - `runtime_tier` is a comparison bucket only. The config itself sets the real training budget.
 - Use `medium` as the main exploration/evaluation bucket and `long` to tie down the strongest candidates at the end of exploration.
+- Wrapper policy rejections are non-terminal feedback; if a proposal is rejected as a plateau micro-tweak, the next step should broaden rather than stop the run.
 - `test` stays locked until there is an explicit finalist selection.
 - Limited search should still use real GPU budgets, not ultra-short proxy runs.
 

@@ -35,7 +35,8 @@
 - Each run must preserve its generated config, logs, checkpoint path, and validation metrics path.
 - For each baseline or candidate run, the agent should state the expected runtime and why that budget matches the method change.
 - Near-best runs within the configured noise band should be retained as `candidate` so faster or otherwise attractive alternatives remain available for finalist comparison.
-- If several cycles plateau without a new keep, the search should broaden to another family, a coherent multi-axis jump, or benchmark `src/` code edits instead of continuing same-family config-only micro-tuning.
+- If several cycles plateau without a new keep, the search should broaden to another family, a coherent same-family broad jump, or benchmark `src/` code edits instead of continuing same-family micro-tuning.
+- Wrapper policy rejections are non-terminal loop feedback and should trigger a broader follow-up proposal, not session termination.
 - If the loop behavior or CLI changes, update `README.md` and `program.md`.
 - Keep Codex loop state minimal: one repo-local `CODEX_HOME`, one thread id file, one session state file, and log files.
 

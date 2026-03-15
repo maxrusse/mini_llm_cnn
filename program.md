@@ -50,7 +50,10 @@ Integrate transdomain knowledge when useful: if another domain has a method that
 - Cross-domain transfer is encouraged. If another domain has a method with a credible mapping to this benchmark's failure modes, bring it in and adapt it rather than staying confined to x-ray-specific precedent.
 - Treat crashes separately from metric evidence. A crash is a repair target when feasible, not a reason by itself to abandon an architecture or method direction.
 - Use `experiment_summary.tsv` to audit what has actually been explored. If recent runs cluster inside one model family or one narrow hyperparameter basin, broaden again.
-- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family config-only tweaks. Broaden with a different family, a coherent multi-axis jump, or benchmark `src/` code edits.
+- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family micro-tweaks. Broaden with a different family, a same-family broad jump, or benchmark `src/` code edits.
+- A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
+- Treat wrapper policy rejections as feedback, not session-ending blockers.
+- If plateau persists with zero `code_edits` attempts, the next rounds should bias toward a benchmark `src/` implementation experiment instead of another local config-only nudge.
 - When local tuning goes flat, broaden with benchmark-supported architecture moves such as:
   - model family or backbone changes
   - width or capacity changes
@@ -78,3 +81,4 @@ Integrate transdomain knowledge when useful: if another domain has a method that
 4. Otherwise choose a `run_config` candidate, set its comparison bucket in `runtime_tier`, set the real training budget directly in `config_yaml`, and explain the budget choice, or request `install_package` / `download_file` only when directly justified.
 5. Review the next cycle's result summary and continue until manually stopped.
 6. If a run crashes because of a missing module, unsupported model/config surface, or another bounded implementation gap, prefer a repair path such as `install_package`, `download_file`, or `run_config.code_edits` before abandoning the direction.
+7. If the wrapper rejects a proposal as a plateau micro-tweak, use that rejection to broaden the next proposal rather than stopping the session.

@@ -206,6 +206,8 @@ class AutoRepairHelpersTests(unittest.TestCase):
                     auto_repair_model_package_map={},
                     auto_repair_model_fallback_map={},
                     runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
                 )
             written = (tmp_dir / "generated_configs" / "escaped.yaml").read_text(encoding="utf-8")
             self.assertEqual(outcome["status"], "executed")
@@ -265,6 +267,8 @@ class AutoRepairHelpersTests(unittest.TestCase):
                     auto_repair_model_package_map={},
                     auto_repair_model_fallback_map={},
                     runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
                 )
             written = (tmp_dir / "generated_configs" / "repaired.yaml").read_text(encoding="utf-8")
             self.assertEqual(outcome["status"], "executed")
@@ -306,7 +310,7 @@ class AutoRepairHelpersTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.object(codex_loop, "run_logged_command") as mocked_run:
-                with self.assertRaisesRegex(RuntimeError, "plain simple_unet search is stuck"):
+                with self.assertRaisesRegex(codex_loop.PolicyRejectError, "plain simple_unet search is stuck"):
                     codex_loop.execute_wrapper_action(
                         action={
                             "action": "run_config",
@@ -337,12 +341,14 @@ class AutoRepairHelpersTests(unittest.TestCase):
                         auto_repair_model_package_map={},
                         auto_repair_model_fallback_map={},
                         runtime_env={},
+                        same_family_micro_tweak_streak=6,
+                        same_family_broad_jump_min_axes=2,
                     )
                 mocked_run.assert_not_called()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def test_execute_wrapper_action_blocks_same_family_after_plateau(self) -> None:
+    def test_execute_wrapper_action_rejects_same_family_micro_tweak_after_plateau(self) -> None:
         tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
         tmp_root.mkdir(parents=True, exist_ok=True)
         tmp_dir = tmp_root / "family_plateau_case"
@@ -370,7 +376,7 @@ class AutoRepairHelpersTests(unittest.TestCase):
                 )
             (tmp_dir / "results.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
             with mock.patch.object(codex_loop, "run_logged_command") as mocked_run:
-                with self.assertRaisesRegex(RuntimeError, "search plateaued in the current best model family"):
+                with self.assertRaisesRegex(codex_loop.PolicyRejectError, "micro-tweak"):
                     codex_loop.execute_wrapper_action(
                         action={
                             "action": "run_config",
@@ -401,10 +407,96 @@ class AutoRepairHelpersTests(unittest.TestCase):
                         auto_repair_model_package_map={},
                         auto_repair_model_fallback_map={},
                         runtime_env={},
+                        same_family_micro_tweak_streak=6,
+                        same_family_broad_jump_min_axes=2,
                     )
                 mocked_run.assert_not_called()
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_allows_same_family_broad_jump_after_plateau(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "family_broad_jump_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "generated_configs").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "benchmark" / "src").mkdir(parents=True, exist_ok=True)
+        try:
+            def write_config(name: str, text: str) -> str:
+                path = tmp_dir / "generated_configs" / name
+                path.write_text(text, encoding="utf-8")
+                return str(path.relative_to(tmp_dir))
+
+            baseline_cfg = write_config("baseline.yaml", "model:\n  name: simple_unet\n")
+            best_cfg = write_config(
+                "best.yaml",
+                "input:\n  image_size: 320\ntraining:\n  epochs: 35\nmodel:\n  name: deeplabv3plus\n  backbone: resnet50\n  pretrained: true\n",
+            )
+            rows = [
+                "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes",
+                f"e0001\t\tbaseline\tmedium\t{baseline_cfg}\t\t\troc_auc_presence\t0.60\t1\t1\tbaseline",
+                f"e0002\te0001\tkeep\tmedium\t{best_cfg}\t\t\troc_auc_presence\t0.70\t1\t1\tbest",
+            ]
+            for idx in range(3, 9):
+                cfg = write_config(
+                    f"discard_{idx}.yaml",
+                    "input:\n  image_size: 320\ntraining:\n  epochs: 35\nmodel:\n  name: deeplabv3plus\n  backbone: resnet50\n  pretrained: true\n",
+                )
+                rows.append(
+                    f"e{idx:04d}\te0002\tdiscard\tmedium\t{cfg}\t\t\troc_auc_presence\t0.69\t1\t1\tnote"
+                )
+            (tmp_dir / "results.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with mock.patch.object(codex_loop, "run_logged_command", return_value={"returncode": 0}) as mocked_run:
+                outcome = codex_loop.execute_wrapper_action(
+                    action={
+                        "action": "run_config",
+                        "label": "plateau_broad_jump",
+                        "runtime_tier": "medium",
+                        "config_path": "generated_configs/new_same_family.yaml",
+                        "config_yaml": (
+                            "input:\n  image_size: 384\n"
+                            "training:\n  epochs: 50\n"
+                            "model:\n  name: deeplabv3plus\n  backbone: resnet50\n  pretrained: false\n"
+                        ),
+                        "code_edits": [],
+                    },
+                    repo_root=tmp_dir,
+                    app_cfg={
+                        "runtime_tiers": {"medium": {}},
+                        "results_file": "results.tsv",
+                        "selection_metric": "roc_auc_presence",
+                    },
+                    benchmark_repo_root=tmp_dir / "benchmark",
+                    benchmark_python=pathlib.Path("python"),
+                    controller_python=pathlib.Path("python"),
+                    default_tier="medium",
+                    search_space_name="open",
+                    cycle_index=1,
+                    logs_dir=tmp_dir / "logs",
+                    auto_repair_enabled=False,
+                    auto_repair_retry_on_success=False,
+                    auto_repair_allow_direct_module_install=False,
+                    auto_repair_module_package_map={},
+                    auto_repair_module_alias_map={},
+                    auto_repair_model_package_map={},
+                    auto_repair_model_fallback_map={},
+                    runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
+                )
+            self.assertEqual(outcome["status"], "executed")
+            self.assertEqual(outcome["proposal_kind"], "same_family_broad_jump")
+            self.assertIn("input_scale", outcome["changed_axes"])
+            self.assertIn("training_budget", outcome["changed_axes"])
+            mocked_run.assert_called_once()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_should_stop_loop_treats_policy_rejected_as_non_terminal(self) -> None:
+        self.assertFalse(codex_loop.should_stop_loop(action_kind="run_config", execution_status="policy_rejected"))
+        self.assertTrue(codex_loop.should_stop_loop(action_kind="blocked", execution_status="terminal_blocked"))
+        self.assertTrue(codex_loop.should_stop_loop(action_kind="run_config", execution_status="infra_blocked"))
 
 
 if __name__ == "__main__":

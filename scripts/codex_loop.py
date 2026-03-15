@@ -69,6 +69,13 @@ PATH_LIKE_ENV_VARS: set[str] = {
     "TMPDIR",
 }
 PLAIN_SIMPLE_UNET_STREAK_LIMIT = 3
+DEFAULT_SAME_FAMILY_MICRO_TWEAK_STREAK = 6
+DEFAULT_CODE_EDIT_ESCALATION_STREAK = 8
+DEFAULT_SAME_FAMILY_BROAD_JUMP_MIN_AXES = 2
+
+
+class PolicyRejectError(RuntimeError):
+    pass
 
 
 def utc_now() -> str:
@@ -196,6 +203,146 @@ def current_best_result(results: list[dict[str, str]], tier: str, metric_key: st
             best_val = score
             best_row = row
     return best_row
+
+
+def latest_result_row(results_path: pathlib.Path, *, tier: str | None = None) -> dict[str, str] | None:
+    rows = load_results_rows(results_path)
+    if tier is None:
+        return rows[-1] if rows else None
+    for row in reversed(rows):
+        if row.get("runtime_tier") == tier:
+            return row
+    return None
+
+
+def family_attempt_counts(results: list[dict[str, str]], repo_root: pathlib.Path, tier: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in results:
+        if row.get("runtime_tier") != tier:
+            continue
+        family = model_name_from_result_row(repo_root, row)
+        if not family:
+            continue
+        counts[family] = counts.get(family, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def family_last_keep(results: list[dict[str, str]], repo_root: pathlib.Path, tier: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in results:
+        if row.get("runtime_tier") != tier:
+            continue
+        if str(row.get("status", "")).strip().lower() not in {"baseline", "keep", "candidate"}:
+            continue
+        family = model_name_from_result_row(repo_root, row)
+        if family:
+            out[family] = str(row.get("experiment_id", "")).strip()
+    return out
+
+
+def count_session_code_edit_attempts(session_cycles: list[dict[str, Any]]) -> int:
+    total = 0
+    for cycle in session_cycles:
+        action = cycle.get("action", {})
+        if isinstance(action, dict) and action.get("code_edits"):
+            total += 1
+    return total
+
+
+def count_session_web_search_cycles(session_cycles: list[dict[str, Any]]) -> int:
+    total = 0
+    for cycle in session_cycles:
+        telemetry = cycle.get("telemetry", {})
+        if isinstance(telemetry, dict) and telemetry.get("used_web_search"):
+            total += 1
+    return total
+
+
+def determine_search_phase(
+    *,
+    tier: str,
+    best_exists: bool,
+    non_keep_streak: int,
+    allowed_runtime_tiers: list[str],
+    finalize_runtime_tiers: list[str],
+    code_edit_attempt_count: int,
+    code_edit_escalation_streak: int,
+) -> str:
+    if tier in finalize_runtime_tiers and best_exists:
+        return "finalize"
+    if not best_exists:
+        return "explore"
+    if non_keep_streak >= max(1, code_edit_escalation_streak) and "long" in allowed_runtime_tiers and tier != "long":
+        return "finalize"
+    if non_keep_streak >= 3 or code_edit_attempt_count > 0:
+        return "refine"
+    return "explore"
+
+
+def build_progress_snapshot(
+    *,
+    repo_root: pathlib.Path,
+    results_path: pathlib.Path,
+    tier: str,
+    metric_key: str,
+    session_cycles: list[dict[str, Any]],
+    allowed_runtime_tiers: list[str],
+    finalize_runtime_tiers: list[str],
+    code_edit_escalation_streak: int,
+) -> dict[str, Any]:
+    results = load_results_rows(results_path)
+    best = current_best_result(results, tier, metric_key)
+    non_keep = recent_non_keep_streak(results_path=results_path, tier=tier)
+    code_edit_attempts = count_session_code_edit_attempts(session_cycles)
+    web_search_cycles = count_session_web_search_cycles(session_cycles)
+    phase = determine_search_phase(
+        tier=tier,
+        best_exists=best is not None,
+        non_keep_streak=non_keep,
+        allowed_runtime_tiers=allowed_runtime_tiers,
+        finalize_runtime_tiers=finalize_runtime_tiers,
+        code_edit_attempt_count=code_edit_attempts,
+        code_edit_escalation_streak=code_edit_escalation_streak,
+    )
+    recommended_runtime_tier = tier
+    if phase == "finalize" and "long" in allowed_runtime_tiers and tier != "long":
+        recommended_runtime_tier = "long"
+    return {
+        "phase": phase,
+        "recommended_runtime_tier": recommended_runtime_tier,
+        "non_keep_streak_by_tier": {tier: non_keep},
+        "family_attempt_counts": {tier: family_attempt_counts(results, repo_root, tier)},
+        "family_last_keep": {tier: family_last_keep(results, repo_root, tier)},
+        "code_edit_attempt_count": code_edit_attempts,
+        "web_search_cycles": web_search_cycles,
+        "code_edit_escalation_due": non_keep >= max(1, code_edit_escalation_streak) and code_edit_attempts == 0,
+    }
+
+
+def format_progress_snapshot(progress: dict[str, Any], tier: str) -> str:
+    family_counts = progress.get("family_attempt_counts", {}).get(tier, {})
+    family_count_text = ", ".join(f"{name}:{count}" for name, count in list(family_counts.items())[:6]) or "(none)"
+    family_last_keep = progress.get("family_last_keep", {}).get(tier, {})
+    last_keep_text = ", ".join(f"{name}->{exp_id}" for name, exp_id in list(family_last_keep.items())[:6]) or "(none)"
+    lines = [
+        f"- phase={progress.get('phase', 'explore')}",
+        f"- recommended_runtime_tier={progress.get('recommended_runtime_tier', tier)}",
+        f"- non_keep_streak[{tier}]={progress.get('non_keep_streak_by_tier', {}).get(tier, 0)}",
+        f"- family_attempt_counts[{tier}]={family_count_text}",
+        f"- family_last_keep[{tier}]={last_keep_text}",
+        f"- code_edit_attempt_count={progress.get('code_edit_attempt_count', 0)}",
+        f"- web_search_cycles={progress.get('web_search_cycles', 0)}",
+    ]
+    if progress.get("code_edit_escalation_due"):
+        lines.append("- escalation_due=plateau has persisted without any code_edit attempts; prefer a code_edit experiment or a clearly broader jump.")
+    return "\n".join(lines)
+
+
+def should_stop_loop(*, action_kind: str, execution_status: str) -> bool:
+    status = str(execution_status).strip().lower()
+    if str(action_kind).strip().lower() == "done" and status != "policy_rejected":
+        return True
+    return status in {"terminal_blocked", "infra_blocked"}
 
 
 def benchmark_baseline_config_path(repo_root: pathlib.Path, app_cfg: dict[str, Any], benchmark_repo_root: pathlib.Path) -> pathlib.Path:
@@ -748,6 +895,13 @@ def sanitize_config_yaml_text(raw_yaml: str) -> str:
     raise RuntimeError(f"config_yaml is not valid YAML: {last_error}")
 
 
+def load_yaml_mapping_from_text(yaml_text: str) -> dict[str, Any]:
+    payload = yaml.safe_load(yaml_text)
+    if not isinstance(payload, dict):
+        raise RuntimeError("config_yaml must parse to a YAML mapping")
+    return payload
+
+
 def extract_model_name_from_yaml_text(yaml_text: str) -> str:
     if not yaml_text:
         return ""
@@ -759,6 +913,90 @@ def extract_model_name_from_yaml_text(yaml_text: str) -> str:
     if not match:
         return ""
     return str(match.group(1)).strip().lower()
+
+
+def nested_get(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def classify_same_family_change_axes(candidate_cfg: dict[str, Any], best_cfg: dict[str, Any]) -> set[str]:
+    axes: set[str] = set()
+    if any(
+        nested_get(candidate_cfg, "model", key) != nested_get(best_cfg, "model", key)
+        for key in ("backbone", "pretrained", "pretrained_backbone", "base_channels", "cls_hidden", "cls_dropout")
+    ):
+        axes.add("model_capacity")
+    if any(
+        nested_get(candidate_cfg, "input", key) != nested_get(best_cfg, "input", key)
+        for key in ("image_size", "preserve_aspect")
+    ):
+        axes.add("input_scale")
+    if any(
+        nested_get(candidate_cfg, "training", key) != nested_get(best_cfg, "training", key)
+        for key in ("epochs", "max_train_batches", "max_eval_batches", "batch_size")
+    ):
+        axes.add("training_budget")
+    if any(
+        nested_get(candidate_cfg, "training", key) != nested_get(best_cfg, "training", key)
+        for key in ("learning_rate", "min_lr", "weight_decay", "scheduler")
+    ):
+        axes.add("optimization")
+    if any(
+        nested_get(candidate_cfg, "training", key) != nested_get(best_cfg, "training", key)
+        for key in (
+            "balanced_sampling",
+            "patch_enabled",
+            "patch_size",
+            "patch_positive_prob",
+            "patch_hard_negative_prob",
+            "patch_hard_negative_quantile",
+        )
+    ):
+        axes.add("sampling")
+    if any(
+        nested_get(candidate_cfg, "loss", key) != nested_get(best_cfg, "loss", key)
+        for key in (
+            "name",
+            "bce_weight",
+            "dice_weight",
+            "dice_positive_only",
+            "presence_bce_weight",
+            "presence_bce_warmup_epochs",
+        )
+    ):
+        axes.add("loss")
+    if any(
+        nested_get(candidate_cfg, "runtime", key) != nested_get(best_cfg, "runtime", key)
+        for key in ("amp",)
+    ):
+        axes.add("runtime")
+    return axes
+
+
+def classify_proposal_kind(
+    *,
+    proposed_model_name: str,
+    candidate_cfg: dict[str, Any],
+    best_model_name: str,
+    best_cfg: dict[str, Any] | None,
+    has_code_edits: bool,
+    same_family_broad_jump_min_axes: int,
+) -> tuple[str, set[str]]:
+    if has_code_edits:
+        return "code_edit_experiment", set()
+    if not best_cfg or not best_model_name or not proposed_model_name:
+        return "cross_family_jump", set()
+    if proposed_model_name != best_model_name:
+        return "cross_family_jump", set()
+    axes = classify_same_family_change_axes(candidate_cfg, best_cfg)
+    if len(axes) >= max(1, int(same_family_broad_jump_min_axes)):
+        return "same_family_broad_jump", axes
+    return "same_family_micro_tweak", axes
 
 
 def model_name_from_result_row(repo_root: pathlib.Path, row: dict[str, str]) -> str:
@@ -866,6 +1104,7 @@ def build_initial_prompt(
     status_output: str,
     results_tail: str,
     best_context: dict[str, str],
+    progress_text: str,
 ) -> str:
     best_section = "No kept run exists yet for this tier."
     if best_context.get("experiment_id"):
@@ -904,7 +1143,9 @@ Core rules:
 - Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
 - Longer bounded programming work is allowed if it is the cleanest way to test a strong idea.
 - If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
-- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family config-only tweaks. Broaden to a different family, a coherent multi-axis jump, or benchmark src code edits.
+- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family micro-tweaks. Use another family, a same-family broad jump, or benchmark src code edits.
+- A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
+- Treat wrapper policy rejections as feedback and continue searching; they are not terminal blockers.
 - Do not choose done early. If more than about {done_guard_minutes} minutes remain before {deadline_utc} and meaningful directions still exist, keep searching.
 
 Search expectations:
@@ -941,6 +1182,9 @@ Search-space policy:
 Runtime tiers:
 {runtime_tier_text}
 
+Loop progress:
+{progress_text}
+
 Status:
 {status_output}
 
@@ -976,6 +1220,7 @@ def build_resume_prompt(
     previous_cycle_summary: str,
     previous_action: dict[str, Any] | None,
     previous_execution: dict[str, Any] | None,
+    progress_text: str,
 ) -> str:
     best_section = "No kept run exists yet for this tier."
     if best_context.get("experiment_id"):
@@ -1010,15 +1255,21 @@ Keep these rules active:
 - Near-best runs inside the configured noise band should be kept as `candidate` when they may still matter for speed, simplicity, or other auxiliary advantages.
 - Broaden if the search collapses into one narrow basin.
 - If recent attempts in this tier are still plain `simple_unet` config-only runs and none improve, do not propose another plain `simple_unet` config-only run. Switch model family or use benchmark src code edits.
-- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family config-only tweaks. Broaden to a different family, a coherent multi-axis jump, or benchmark src code edits.
+- If a tier has plateaued for several cycles without a keep, do not keep proposing same-family micro-tweaks. Use another family, a same-family broad jump, or benchmark src code edits.
+- A same-family broad jump should usually change at least two meaningful axes such as backbone/pretraining, resolution/aspect handling, training budget, sampling regime, or loss structure.
 - Benchmark src/ code edits are allowed only under ../xray_fracture_benchmark/src via run_config.code_edits, paired with one concrete hypothesis.
 - Longer bounded programming work is allowed when it is the cleanest path to a strong experiment.
 - Set the actual budget in config_yaml and state the budget reasoning briefly in `notes` for every baseline or run_config.
+- Treat wrapper policy rejections as feedback and keep searching; they are not terminal blockers.
+- If loop progress says `recommended_runtime_tier=long`, use `long` by default for finalist tie-down unless there is a strong reason to stay in `medium`.
 - Do not tune on test, edit benchmark scripts, or change datasets/splits.
 - Do not choose done early. If more than about {done_guard_minutes} minutes remain before {deadline_utc} and meaningful directions still exist, keep searching.
 
 Runtime tiers:
 {runtime_tier_text}
+
+Loop progress:
+{progress_text}
 
 Previous cycle summary:
 {previous_cycle_summary or "(none)"}
@@ -1254,13 +1505,15 @@ def execute_wrapper_action(
     auto_repair_model_package_map: dict[str, list[str]],
     auto_repair_model_fallback_map: dict[str, str],
     runtime_env: dict[str, str],
+    same_family_micro_tweak_streak: int,
+    same_family_broad_jump_min_axes: int,
 ) -> dict[str, Any]:
     kind = str(action["action"])
     run_loop_path = repo_root / "run_loop.py"
     cycle_slug = f"cycle_{cycle_index:04d}_{kind}"
     selected_tier = str(action.get("runtime_tier", "")).strip() or default_tier
     if kind in {"baseline", "run_config"} and selected_tier not in app_cfg.get("runtime_tiers", {}):
-        raise RuntimeError(f"unknown runtime_tier requested by agent: {selected_tier}")
+        raise PolicyRejectError(f"unknown runtime_tier requested by agent: {selected_tier}")
 
     if kind == "done":
         return {
@@ -1270,7 +1523,7 @@ def execute_wrapper_action(
 
     if kind == "blocked":
         return {
-            "status": "blocked",
+            "status": "terminal_blocked",
             "message": str(action.get("notes", "")).strip() or "agent reported a blocker",
         }
 
@@ -1291,6 +1544,7 @@ def execute_wrapper_action(
         config_path = normalize_generated_config_path(repo_root, str(action["config_path"]))
         config_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_text = sanitize_config_yaml_text(str(action["config_yaml"]))
+        candidate_cfg = load_yaml_mapping_from_text(yaml_text)
         code_edits = action.get("code_edits", [])
         proposed_model_name = extract_model_name_from_yaml_text(yaml_text)
         results_path = resolve_repo_path(repo_root, str(app_cfg["results_file"]))
@@ -1298,6 +1552,27 @@ def execute_wrapper_action(
         selection_metric = str(app_cfg["selection_metric"])
         best_row = current_best_result(results, selected_tier, selection_metric)
         best_model_name = model_name_from_result_row(repo_root, best_row) if best_row else ""
+        best_cfg: dict[str, Any] | None = None
+        if best_row:
+            for key in ("resolved_config_path", "config_path"):
+                raw = str(best_row.get(key, "")).strip()
+                if not raw:
+                    continue
+                resolved = resolve_repo_path(repo_root, raw)
+                try:
+                    best_cfg = load_yaml_mapping_from_text(try_read_text(resolved))
+                except Exception:
+                    continue
+                if best_cfg:
+                    break
+        proposal_kind, changed_axes = classify_proposal_kind(
+            proposed_model_name=proposed_model_name,
+            candidate_cfg=candidate_cfg,
+            best_model_name=best_model_name,
+            best_cfg=best_cfg,
+            has_code_edits=bool(code_edits),
+            same_family_broad_jump_min_axes=same_family_broad_jump_min_axes,
+        )
         if (
             search_space_name == "open"
             and not code_edits
@@ -1309,7 +1584,7 @@ def execute_wrapper_action(
             )
             >= PLAIN_SIMPLE_UNET_STREAK_LIMIT
         ):
-            raise RuntimeError(
+            raise PolicyRejectError(
                 "plain simple_unet search is stuck in this tier; propose a different model family or use benchmark src code_edits"
             )
         if (
@@ -1318,14 +1593,16 @@ def execute_wrapper_action(
             and proposed_model_name
             and best_model_name
             and proposed_model_name == best_model_name
-            and recent_non_keep_streak(results_path=results_path, tier=selected_tier) >= 6
+            and proposal_kind == "same_family_micro_tweak"
+            and recent_non_keep_streak(results_path=results_path, tier=selected_tier) >= max(1, same_family_micro_tweak_streak)
         ):
-            raise RuntimeError(
-                "search plateaued in the current best model family; propose another family, a coherent broader jump, or benchmark src code_edits"
+            raise PolicyRejectError(
+                "search plateaued in the current best model family; this proposal is still a micro-tweak. "
+                f"Changed axes={sorted(changed_axes)}. Propose another family, a same-family broad jump, or benchmark src code_edits."
             )
         config_path.write_text(yaml_text, encoding="utf-8")
         if code_edits and search_space_name != "open":
-            raise RuntimeError("code_edits are allowed only in open search")
+            raise PolicyRejectError("code_edits are allowed only in open search")
 
         label = str(action.get("label", "")).strip() or "candidate"
         command = [
@@ -1349,7 +1626,7 @@ def execute_wrapper_action(
             best_row = current_best_result(results, selected_tier, selection_metric)
             current_best_id = str(best_row.get("experiment_id", "")).strip() if best_row else ""
             if current_best_id and parent_experiment_id and parent_experiment_id != current_best_id:
-                raise RuntimeError("code_edits currently require parent_experiment_id to match the current kept best for that tier")
+                raise PolicyRejectError("code_edits currently require parent_experiment_id to match the current kept best for that tier")
             for edit in code_edits:
                 target_path = normalize_benchmark_code_path(benchmark_repo_root, str(edit.get("path", "")))
                 existed = target_path.exists()
@@ -1418,6 +1695,8 @@ def execute_wrapper_action(
                 "runtime_tier": selected_tier,
                 "code_edit_paths": edited_paths,
                 "code_edit_retained": bool(backups) and latest_status in {"keep", "baseline", "candidate"} if backups else False,
+                "proposal_kind": proposal_kind,
+                "changed_axes": sorted(changed_axes),
             }
         )
         if repair is not None:
@@ -1552,6 +1831,14 @@ def main() -> int:
     metric_key = str(app_cfg["selection_metric"])
     done_guard_minutes = int(loop_cfg.get("done_allowed_within_minutes", 30))
     allowed_runtime_tiers = list_allowed_runtime_tiers(loop_cfg, args.search_space, app_cfg)
+    finalize_runtime_tiers = [
+        str(item).strip()
+        for item in loop_cfg.get("finalize_runtime_tiers", [])
+        if str(item).strip() in app_cfg.get("runtime_tiers", {})
+    ]
+    same_family_micro_tweak_streak = int(loop_cfg.get("same_family_micro_tweak_streak", DEFAULT_SAME_FAMILY_MICRO_TWEAK_STREAK))
+    code_edit_escalation_streak = int(loop_cfg.get("code_edit_escalation_streak", DEFAULT_CODE_EDIT_ESCALATION_STREAK))
+    same_family_broad_jump_min_axes = int(loop_cfg.get("same_family_broad_jump_min_axes", DEFAULT_SAME_FAMILY_BROAD_JUMP_MIN_AXES))
     runtime_tier_text = runtime_tier_summary(app_cfg, allowed_runtime_tiers)
     baseline_config_path = benchmark_baseline_config_path(repo_root, app_cfg, benchmark_repo_root)
     baseline_config_text = read_text_limited(baseline_config_path, max_chars=6000)
@@ -1563,6 +1850,17 @@ def main() -> int:
         tier=args.tier,
         metric_key=metric_key,
     )
+    progress = build_progress_snapshot(
+        repo_root=repo_root,
+        results_path=results_path,
+        tier=args.tier,
+        metric_key=metric_key,
+        session_cycles=[],
+        allowed_runtime_tiers=allowed_runtime_tiers,
+        finalize_runtime_tiers=finalize_runtime_tiers,
+        code_edit_escalation_streak=code_edit_escalation_streak,
+    )
+    progress_text = format_progress_snapshot(progress, args.tier)
 
     session_state: dict[str, Any] = {
         "started_utc": utc_now(),
@@ -1581,6 +1879,7 @@ def main() -> int:
         "benchmark_repo_root": str(benchmark_repo_root),
         "auto_repair_enabled": auto_repair_enabled,
         "runtime_env_overrides": loop_cfg.get("runtime_env", {}),
+        "progress": progress,
         "session_log": str(session_log),
         "cycles": [],
     }
@@ -1601,6 +1900,7 @@ def main() -> int:
         status_output=status_output,
         results_tail=latest_results_summary(results_path),
         best_context=best_context,
+        progress_text=progress_text,
     )
     if args.dry_run:
         session_log.write_text(prompt, encoding="utf-8")
@@ -1662,7 +1962,7 @@ def main() -> int:
             )
             if issues:
                 execution: dict[str, Any] = {
-                    "status": "rejected",
+                    "status": "policy_rejected",
                     "message": "action validation failed: " + ", ".join(issues),
                 }
             else:
@@ -1686,10 +1986,17 @@ def main() -> int:
                         auto_repair_model_package_map=auto_repair_model_package_map,
                         auto_repair_model_fallback_map=auto_repair_model_fallback_map,
                         runtime_env=runtime_env,
+                        same_family_micro_tweak_streak=same_family_micro_tweak_streak,
+                        same_family_broad_jump_min_axes=same_family_broad_jump_min_axes,
                     )
+                except PolicyRejectError as exc:
+                    execution = {
+                        "status": "policy_rejected",
+                        "message": str(exc),
+                    }
                 except Exception as exc:
                     execution = {
-                        "status": "blocked",
+                        "status": "infra_blocked",
                         "message": str(exc),
                     }
         except Exception as exc:
@@ -1707,7 +2014,7 @@ def main() -> int:
                 "notes": str(exc),
             }
             execution = {
-                "status": "blocked",
+                "status": "infra_blocked",
                 "message": str(exc),
             }
             codex_result = {
@@ -1730,6 +2037,12 @@ def main() -> int:
         )
         previous_action = action
         previous_execution = execution
+        outcome_label = str(execution.get("status", "")).strip() or "unknown"
+        if outcome_label == "executed" and action.get("action") in {"baseline", "run_config"}:
+            latest_row = latest_result_row(results_path, tier=args.tier)
+            latest_status = str((latest_row or {}).get("status", "")).strip().lower()
+            if latest_status:
+                outcome_label = f"executed_{latest_status}"
 
         cycle_record = {
             "cycle": cycle,
@@ -1740,18 +2053,29 @@ def main() -> int:
             "telemetry": codex_result.get("telemetry", {}),
             "action": action,
             "execution": execution,
+            "outcome_label": outcome_label,
         }
         session_state["thread_id"] = codex_result.get("thread_id", "")
-        session_state["last_cycle"] = cycle_record
         session_state["cycles"].append(cycle_record)
+        progress = build_progress_snapshot(
+            repo_root=repo_root,
+            results_path=results_path,
+            tier=args.tier,
+            metric_key=metric_key,
+            session_cycles=session_state.get("cycles", []),
+            allowed_runtime_tiers=allowed_runtime_tiers,
+            finalize_runtime_tiers=finalize_runtime_tiers,
+            code_edit_escalation_streak=code_edit_escalation_streak,
+        )
+        progress_text = format_progress_snapshot(progress, args.tier)
+        session_state["progress"] = progress
+        session_state["last_cycle"] = cycle_record
         session_state_file.write_text(json.dumps(session_state, indent=2), encoding="utf-8")
         with session_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(cycle_record, ensure_ascii=True) + "\n")
 
         terminal_status = str(execution.get("status", "")).strip().lower()
-        if action["action"] in {"done", "blocked"} and terminal_status != "rejected":
-            break
-        if terminal_status == "blocked":
+        if should_stop_loop(action_kind=str(action.get("action", "")), execution_status=terminal_status):
             break
 
         prompt = build_resume_prompt(
@@ -1767,6 +2091,7 @@ def main() -> int:
             previous_cycle_summary=previous_cycle_summary,
             previous_action=previous_action,
             previous_execution=previous_execution,
+            progress_text=progress_text,
         )
         if pause_seconds > 0:
             time.sleep(pause_seconds)

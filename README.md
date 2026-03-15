@@ -11,6 +11,7 @@ It is designed to be much simpler than `llm_driven_cnns`: a single Codex agent o
 - primarily searches by changing YAML configs
 - can also test benchmark `src/` code ideas in `open` mode, from small helper changes up to new heads, model classes, or pipeline components
 - can auto-repair one failed `run_config` cycle by installing mapped packages or retrying with a configured model-name fallback
+- treats wrapper policy rejections as non-terminal feedback, so the session can reprompt and continue instead of stopping early
 - selects candidates by the validation metric stack `roc_auc_presence > average_precision_presence > best_f1_presence > dice_pos`
 - uses `runtime_tier` as a comparison bucket only; actual training budget is set per experiment in the config itself
 - expects open search to actually use web search for outside ideas
@@ -87,6 +88,9 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - recoverable crashes should trigger repair work when the direction still looks promising; they are not the same as measured negative results
 - matched scores stay `discard`, but should remain visible and be noted explicitly as ties in the ledger
 - when a tier plateaus for several cycles without a new keep, the loop should broaden rather than keep making same-family config-only tweaks
+- same-family broad jumps remain allowed after plateau when they change multiple meaningful axes such as pretraining, resolution, training budget, sampling, or loss structure
+- if plateau persists without any benchmark `src/` experiments, the loop should escalate toward `code_edits` instead of ending the session
+- policy-rejected proposals should be logged and fed back into the next prompt, not treated as terminal blockers
 - run locked test only on selected kept or baseline experiments
 - create `.mini_loop/STOP_CODEX_LOOP` if you want the loop to stop after the current cycle
 
