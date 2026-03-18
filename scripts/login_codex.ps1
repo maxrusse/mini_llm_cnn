@@ -1,5 +1,7 @@
 param(
-    [string]$WorkspaceRoot = ""
+    [string]$WorkspaceRoot = "",
+    [ValidateSet("open", "limited", "code", "aggressive", "all")]
+    [string]$SearchSpace = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,17 +14,42 @@ if ($null -eq $codexCmd) {
     throw "codex CLI not found in PATH."
 }
 
-$codexHome = Join-Path $WorkspaceRoot ".mini_loop\codex_home"
-if (-not (Test-Path $codexHome)) {
-    New-Item -ItemType Directory -Path $codexHome -Force | Out-Null
+$codexHomes = @()
+switch ($SearchSpace) {
+    "code" {
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home_code")
+    }
+    "aggressive" {
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home_aggressive")
+    }
+    "open" {
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home")
+    }
+    "limited" {
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home")
+    }
+    default {
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home")
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home_code")
+        $codexHomes += (Join-Path $WorkspaceRoot ".mini_loop\codex_home_aggressive")
+    }
+}
+$codexHomes = $codexHomes | Select-Object -Unique
+
+foreach ($codexHome in $codexHomes) {
+    if (-not (Test-Path $codexHome)) {
+        New-Item -ItemType Directory -Path $codexHome -Force | Out-Null
+    }
 }
 
 $prevCodexHome = $env:CODEX_HOME
-$env:CODEX_HOME = $codexHome
 try {
-    Write-Host ("Using CODEX_HOME=" + $codexHome)
-    & codex login --device-auth
-    & codex login status
+    foreach ($codexHome in $codexHomes) {
+        $env:CODEX_HOME = $codexHome
+        Write-Host ("Using CODEX_HOME=" + $codexHome)
+        & codex login --device-auth
+        & codex login status
+    }
 } finally {
     if ([string]::IsNullOrWhiteSpace($prevCodexHome)) {
         Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue

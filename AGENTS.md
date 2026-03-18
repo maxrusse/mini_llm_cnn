@@ -10,6 +10,7 @@
 - In `limited` mode, stay config-only.
 - In `open` mode, benchmark code edits under `../xray_fracture_benchmark/src` are allowed only through the wrapper-owned `run_config.code_edits` path.
 - Open-mode code edits may range from small targeted fixes to larger benchmark-side implementations such as new helper functions, new heads, new model classes, or end-to-end training/pipeline components when they are the most feasible way to test a concrete method idea.
+- `code-flow` is a separate implementation-focused mode that reads the strongest kept runs plus review-worthy alternates as an idea pool and then prefers benchmark-side `src/` implementations over more config-only search.
 - Code edits must stay data-driven, tied to one concrete hypothesis, and paired with a real config run.
 - The wrapper currently supports hill-climbing code edits on top of the current kept best for a tier; do not assume arbitrary branching between old code states.
 - Do not tune on `test`; locked test evaluation is explicit and finalist-only.
@@ -43,8 +44,9 @@
 - Before starting a fresh round, archive old run artifacts outside the repo so a new session starts clean without local-result leakage.
 
 ## Operational Commands
-- Login Codex for this repo: `& .\scripts\login_codex.ps1`
+- Login Codex for this repo: `& .\scripts\login_codex.ps1` or `& .\scripts\login_codex.ps1 -SearchSpace code`
 - Start single-agent Codex loop: `& .\scripts\start_codex_loop.ps1 -Tier medium -Hours 8 -SearchSpace open -StartInNewWindow`
+- Start coding-focused flow: `& .\scripts\start_codex_code_fresh.ps1 -Tier medium -Hours 8`
 - Stop after the current cycle: `New-Item -ItemType File -Path .\.mini_loop\STOP_CODEX_LOOP -Force | Out-Null`
 - Baseline: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py baseline --tier smoke`
 - Run explicit config: `& ..\xray_fracture_benchmark_venv\Scripts\python.exe .\run_loop.py run-config --config .\generated_configs\custom.yaml --tier medium --label custom_try`

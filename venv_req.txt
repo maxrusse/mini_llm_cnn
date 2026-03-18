@@ -1,0 +1,25 @@
+# Required training venv for mini_llm_cnn
+#
+# This repo does not define its own training environment. The expected
+# interpreter is:
+#   ..\xray_fracture_benchmark_venv\Scripts\python.exe
+#
+# Source of truth for rebuilding that venv lives in:
+#   ..\xray_fracture_benchmark\requirements-cu128.txt
+#   ..\xray_fracture_benchmark\requirements.txt
+#   ..\xray_fracture_benchmark\scripts\setup_env.ps1
+#
+# Preferred rebuild command:
+#   cd ..\xray_fracture_benchmark
+#   .\scripts\setup_env.ps1
+#
+# Equivalent manual rebuild sequence from C:\Users\Max\code\mini_llm_cnn:
+#   python -m venv C:\Users\Max\code\xray_fracture_benchmark_venv
+#   & C:\Users\Max\code\xray_fracture_benchmark_venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+#   & C:\Users\Max\code\xray_fracture_benchmark_venv\Scripts\python.exe -m pip install -r ..\xray_fracture_benchmark\requirements-cu128.txt
+#   & C:\Users\Max\code\xray_fracture_benchmark_venv\Scripts\python.exe -m pip install -r ..\xray_fracture_benchmark\requirements.txt
+#   & C:\Users\Max\code\xray_fracture_benchmark_venv\Scripts\python.exe ..\xray_fracture_benchmark\scripts\verify_torch_cuda.py
+#
+# Note:
+# `requirements-cu128.txt` and `requirements.txt` are intentionally installed
+# as separate steps. Do not merge them into one pip install command.

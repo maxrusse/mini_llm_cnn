@@ -1,0 +1,31 @@
+{
+  "benchmark_repo_root": "../xray_fracture_benchmark",
+  "benchmark_python_exe": "../xray_fracture_benchmark_venv/Scripts/python.exe",
+  "baseline_config": "configs/baseline.yaml",
+  "selection_metric": "roc_auc_presence",
+  "allow_run_config_bootstrap": true,
+  "default_tier": "medium",
+  "results_file": "results_aggressive.tsv",
+  "summary_file": "experiment_summary_aggressive.tsv",
+  "state_file": ".mini_loop/state_aggressive.json",
+  "generated_config_dir": "generated_configs_aggressive",
+  "logs_dir": "logs_aggressive",
+  "runs_dir": "runs_aggressive",
+  "downloads_dir": "downloads_aggressive",
+  "keep_improvement_epsilon": 1e-06,
+  "llm_review_metric_epsilon": 0.01,
+  "runtime_tiers": {
+    "smoke": {
+      "comparison_only": true,
+      "description": "debug or smoke-test comparison bucket; the config itself sets epochs and batch limits"
+    },
+    "medium": {
+      "comparison_only": true,
+      "description": "main exploration and evaluation bucket"
+    },
+    "long": {
+      "comparison_only": true,
+      "description": "final tie-down bucket for strongest candidates"
+    }
+  }
+}

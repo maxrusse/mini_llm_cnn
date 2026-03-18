@@ -151,7 +151,12 @@ def latest_results_summary(results_path: pathlib.Path, *, max_rows: int = 8) -> 
 
 
 def list_allowed_runtime_tiers(loop_cfg: dict[str, Any], search_space: str, app_cfg: dict[str, Any]) -> list[str]:
-    key = "limited_search_runtime_tiers" if search_space == "limited" else "open_search_runtime_tiers"
+    if search_space == "limited":
+        key = "limited_search_runtime_tiers"
+    elif search_space in {"code", "aggressive"}:
+        key = "code_search_runtime_tiers"
+    else:
+        key = "open_search_runtime_tiers"
     configured = loop_cfg.get(key, [])
     tiers: list[str] = []
     if isinstance(configured, list):
@@ -184,6 +189,20 @@ def load_results_rows(results_path: pathlib.Path) -> list[dict[str, str]]:
     with results_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         return [dict(row) for row in reader]
+
+
+def load_summary_rows(summary_path: pathlib.Path) -> dict[str, dict[str, str]]:
+    if not summary_path.exists():
+        return {}
+    with summary_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        out: dict[str, dict[str, str]] = {}
+        for row in reader:
+            item = dict(row)
+            exp_id = str(item.get("experiment_id", "")).strip()
+            if exp_id:
+                out[exp_id] = item
+        return out
 
 
 def current_best_result(results: list[dict[str, str]], tier: str, metric_key: str) -> dict[str, str] | None:
@@ -373,6 +392,10 @@ def benchmark_baseline_config_path(repo_root: pathlib.Path, app_cfg: dict[str, A
     return (benchmark_repo_root / candidate).resolve()
 
 
+def load_app_config(repo_root: pathlib.Path, raw_path: str) -> dict[str, Any]:
+    return load_json(resolve_repo_path(repo_root, raw_path))
+
+
 def extract_best_config_context(
     *,
     repo_root: pathlib.Path,
@@ -401,6 +424,91 @@ def extract_best_config_context(
         "config_path": preferred,
         "config_text": config_text,
     }
+
+
+def build_idea_pool(
+    *,
+    results_path: pathlib.Path,
+    summary_path: pathlib.Path,
+    tier: str,
+    metric_key: str,
+    max_items: int,
+) -> list[dict[str, str]]:
+    results = load_results_rows(results_path)
+    summary_by_id = load_summary_rows(summary_path)
+    pool: list[dict[str, str]] = []
+    for row in results:
+        if row.get("runtime_tier") != tier:
+            continue
+        status = str(row.get("status", "")).strip().lower()
+        if status == "crash":
+            continue
+        notes = str(row.get("notes", "")).strip()
+        is_review_alternate = "review-worthy alternate" in notes
+        if status not in {"baseline", "keep"} and not is_review_alternate:
+            continue
+        try:
+            score = float(row.get("val_metric_value", "nan"))
+        except Exception:
+            score = float("-inf")
+        exp_id = str(row.get("experiment_id", "")).strip()
+        summary = summary_by_id.get(exp_id, {})
+        pool.append(
+            {
+                "experiment_id": exp_id,
+                "status": status,
+                "metric_key": metric_key,
+                "metric_value": "" if score == float("-inf") else f"{score:.6f}",
+                "model_name": str(summary.get("model_name", "")).strip(),
+                "model_backbone": str(summary.get("model_backbone", "")).strip(),
+                "input_image_size": str(summary.get("input_image_size", "")).strip(),
+                "epochs": str(summary.get("epochs", "")).strip(),
+                "presence_bce_weight": str(summary.get("presence_bce_weight", "")).strip(),
+                "patch_enabled": str(summary.get("patch_enabled", "")).strip(),
+                "notes": notes,
+            }
+        )
+    def _sort_key(item: dict[str, str]) -> tuple[int, float, str]:
+        status_rank = 0 if item.get("status") in {"keep", "baseline"} else 1
+        try:
+            score = float(item.get("metric_value", "nan"))
+        except Exception:
+            score = float("-inf")
+        return (status_rank, -score, item.get("experiment_id", ""))
+    pool.sort(key=_sort_key)
+    return pool[: max(1, max_items)]
+
+
+def format_idea_pool(pool: list[dict[str, str]]) -> str:
+    if not pool:
+        return "No source idea pool entries found yet."
+    lines: list[str] = []
+    for item in pool:
+        model_bits = [item.get("model_name", "")]
+        backbone = item.get("model_backbone", "")
+        if backbone:
+            model_bits.append(backbone)
+        model_text = "/".join(bit for bit in model_bits if bit) or "(unknown model)"
+        suffix_bits = []
+        if item.get("input_image_size"):
+            suffix_bits.append(f"img={item['input_image_size']}")
+        if item.get("epochs"):
+            suffix_bits.append(f"epochs={item['epochs']}")
+        if item.get("patch_enabled"):
+            suffix_bits.append(f"patch={item['patch_enabled']}")
+        if item.get("presence_bce_weight"):
+            suffix_bits.append(f"presence_bce={item['presence_bce_weight']}")
+        suffix = "; ".join(suffix_bits)
+        note = item.get("notes", "")
+        note_txt = note[:180] + ("..." if len(note) > 180 else "")
+        lines.append(
+            f"- {item.get('experiment_id')} [{item.get('status')}] "
+            f"{item.get('metric_key')}={item.get('metric_value')} "
+            f"{model_text}"
+            + (f" ({suffix})" if suffix else "")
+            + (f" | {note_txt}" if note_txt else "")
+        )
+    return "\n".join(lines)
 
 
 def run_capture(
@@ -1070,17 +1178,45 @@ def recent_plain_simple_unet_streak(
     return streak
 
 
-def normalize_generated_config_path(repo_root: pathlib.Path, raw_path: str) -> pathlib.Path:
+def normalize_repo_relative_path_under(
+    *,
+    repo_root: pathlib.Path,
+    raw_path: str,
+    root_dir: str,
+    label: str,
+) -> pathlib.Path:
     candidate = pathlib.Path(str(raw_path).strip())
     if candidate.is_absolute():
-        raise ValueError("config_path must be repo-relative")
+        raise ValueError(f"{label} must be repo-relative")
     resolved = (repo_root / candidate).resolve()
-    generated_root = (repo_root / "generated_configs").resolve()
-    if generated_root not in resolved.parents and resolved != generated_root:
-        raise ValueError("config_path must stay under generated_configs/")
+    allowed_root = resolve_repo_path(repo_root, root_dir)
+    if allowed_root not in resolved.parents and resolved != allowed_root:
+        raise ValueError(f"{label} must stay under {root_dir}/")
+    return resolved
+
+
+def normalize_generated_config_path(repo_root: pathlib.Path, raw_path: str, generated_root_dir: str) -> pathlib.Path:
+    resolved = normalize_repo_relative_path_under(
+        repo_root=repo_root,
+        raw_path=raw_path,
+        root_dir=generated_root_dir,
+        label="config_path",
+    )
     if resolved.suffix.lower() not in {".yaml", ".yml"}:
         raise ValueError("config_path must end in .yaml or .yml")
     return resolved
+
+
+def canonicalize_generated_config_path(raw_path: str, generated_root_dir: str) -> str:
+    candidate = pathlib.Path(str(raw_path).strip())
+    if candidate.is_absolute():
+        return str(candidate)
+    parts = list(candidate.parts)
+    if not parts:
+        return str(pathlib.Path(generated_root_dir) / "candidate.yaml")
+    if parts[0] == "generated_configs" and generated_root_dir != "generated_configs":
+        return str(pathlib.Path(generated_root_dir, *parts[1:]))
+    return str(candidate)
 
 
 def normalize_benchmark_code_path(benchmark_repo_root: pathlib.Path, raw_path: str) -> pathlib.Path:
@@ -1097,15 +1233,13 @@ def normalize_benchmark_code_path(benchmark_repo_root: pathlib.Path, raw_path: s
     return resolved
 
 
-def normalize_download_path(repo_root: pathlib.Path, raw_path: str) -> pathlib.Path:
-    candidate = pathlib.Path(str(raw_path).strip())
-    if candidate.is_absolute():
-        raise ValueError("download_path must be repo-relative")
-    resolved = (repo_root / candidate).resolve()
-    downloads_root = (repo_root / "downloads").resolve()
-    if downloads_root not in resolved.parents and resolved != downloads_root:
-        raise ValueError("download_path must stay under downloads/")
-    return resolved
+def normalize_download_path(repo_root: pathlib.Path, raw_path: str, downloads_root_dir: str) -> pathlib.Path:
+    return normalize_repo_relative_path_under(
+        repo_root=repo_root,
+        raw_path=raw_path,
+        root_dir=downloads_root_dir,
+        label="download_path",
+    )
 
 
 def build_initial_prompt(
@@ -1124,7 +1258,11 @@ def build_initial_prompt(
     status_output: str,
     results_tail: str,
     best_context: dict[str, str],
+    source_best_context: dict[str, str],
+    local_summary_text: str,
+    source_idea_pool_text: str,
     progress_text: str,
+    seed_strategy_text: str,
 ) -> str:
     best_section = "No kept run exists yet for this tier."
     if best_context.get("experiment_id"):
@@ -1134,8 +1272,46 @@ def build_initial_prompt(
             f"Current best config path: {best_context['config_path']}\n"
             f"Current best config text:\n{best_context['config_text'] or '(unavailable)'}"
         )
+    source_best_section = "No source-flow kept run exists yet for this tier."
+    if source_best_context.get("experiment_id"):
+        source_best_section = (
+            f"Source best experiment: {source_best_context['experiment_id']}\n"
+            f"Source best {source_best_context.get('metric_key') or 'metric'}: {source_best_context['metric']}\n"
+            f"Source best config path: {source_best_context['config_path']}\n"
+            f"Source best config text:\n{source_best_context['config_text'] or '(unavailable)'}"
+        )
+    code_flow_section = ""
+    if search_space_name in {"code", "aggressive"}:
+        extra_lines = ""
+        if search_space_name == "aggressive":
+            extra_lines = (
+                "- This flow is aggressive by default. Prefer meaningful benchmark `src/` implementations "
+                "such as new heads, fusion blocks, evidence aggregation, auxiliary supervision, or other bounded "
+                "pipeline components over small loss-only tweaks.\n"
+                "- Loss-only edits are allowed only when they clearly support a broader iterative implementation path.\n"
+                "- Favor iterative build-out of one next-generation approach family over isolated one-off tweaks.\n"
+            )
+        code_flow_section = f"""
 
-    return f"""You are the single research agent for this repo.
+Code-flow expectations:
+- This flow is code-first. After the initial seed/control step, most run_config actions should include benchmark src code_edits.
+- Prefer proposals that materially expand the benchmark implementation surface, not just config retuning.
+- Use the current strongest code state as a base and climb from it unless there is a strong reason to branch.
+- Keep the hypothesis coherent, but it may span multiple collaborating `src/` files when that is the cleanest way to test one next-step design.
+{extra_lines}- Seed strategy:
+{seed_strategy_text}
+- Use the source idea pool to mix, intensify, or re-express promising ideas at code level.
+- When possible, improve the current best code state rather than proposing another config-only variant of the same idea.
+
+Source idea pool:
+{source_idea_pool_text}
+
+Source best:
+{source_best_section}
+"""
+
+    return (
+        f"""You are the single research agent for this repo.
 
 Context:
 - repo={repo_root}
@@ -1179,6 +1355,9 @@ Search expectations:
 - Set the actual budget in config_yaml. Choose epochs, max_train_batches, max_eval_batches, scheduler, and other budget controls based on the method change.
 - State the budget reasoning briefly in `notes` for every baseline or run_config.
 - Longer budgets are expected for heavier changes such as no-pretrain runs, higher resolution, larger backbones, or new code paths when that is methodologically justified.
+"""
+        + code_flow_section
+        + f"""
 
 Actions:
 - baseline
@@ -1193,7 +1372,7 @@ run_config must include:
 - action="run_config"
 - label
 - runtime_tier
-- config_path under generated_configs/
+- config_path under the active generated config dir
 - full config_yaml
 - optional parent_experiment_id
 - optional code_edits with benchmark-repo-relative src/ file paths and full file content
@@ -1213,8 +1392,8 @@ Status:
 Recent results:
 {results_tail}
 
-Experiment summary:
-{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=5000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
+Local experiment summary:
+{local_summary_text}
 
 Baseline config:
 - path={baseline_config_path}
@@ -1226,6 +1405,7 @@ Current best:
 
 Return JSON only.
 """
+    )
 
 
 def build_resume_prompt(
@@ -1239,10 +1419,14 @@ def build_resume_prompt(
     status_output: str,
     results_tail: str,
     best_context: dict[str, str],
+    source_best_context: dict[str, str],
     previous_cycle_summary: str,
     previous_action: dict[str, Any] | None,
     previous_execution: dict[str, Any] | None,
+    local_summary_text: str,
+    source_idea_pool_text: str,
     progress_text: str,
+    seed_strategy_text: str,
 ) -> str:
     best_section = "No kept run exists yet for this tier."
     if best_context.get("experiment_id"):
@@ -1252,11 +1436,49 @@ def build_resume_prompt(
             f"Current best config path: {best_context['config_path']}\n"
             f"Current best config text:\n{best_context['config_text'] or '(unavailable)'}"
         )
+    source_best_section = "No source-flow kept run exists yet for this tier."
+    if source_best_context.get("experiment_id"):
+        source_best_section = (
+            f"Source best experiment: {source_best_context['experiment_id']}\n"
+            f"Source best {source_best_context.get('metric_key') or 'metric'}: {source_best_context['metric']}\n"
+            f"Source best config path: {source_best_context['config_path']}\n"
+            f"Source best config text:\n{source_best_context['config_text'] or '(unavailable)'}"
+        )
 
     previous_action_json = json.dumps(previous_action or {}, ensure_ascii=True, indent=2)
     previous_execution_json = json.dumps(previous_execution or {}, ensure_ascii=True, indent=2)
+    code_flow_section = ""
+    if search_space_name in {"code", "aggressive"}:
+        extra_lines = ""
+        if search_space_name == "aggressive":
+            extra_lines = (
+                "- This flow is aggressive by default. Prefer meaningful benchmark `src/` implementations "
+                "such as new heads, fusion blocks, evidence aggregation, auxiliary supervision, or other bounded "
+                "pipeline components over small loss-only tweaks.\n"
+                "- Loss-only edits are allowed only when they clearly support a broader iterative implementation path.\n"
+                "- Favor iterative build-out of one next-generation approach family over isolated one-off tweaks.\n"
+            )
+        code_flow_section = f"""
 
-    return f"""Continue the same single-agent research thread in {repo_root}.
+Code-flow expectations:
+- This flow is code-first. After the initial seed/control step, most run_config actions should include benchmark src code_edits.
+- Prefer proposals that materially expand the benchmark implementation surface, not just config retuning.
+- Use the current strongest code state as a base and climb from it unless there is a strong reason to branch.
+- Keep the hypothesis coherent, but it may span multiple collaborating `src/` files when that is the cleanest way to test one next-step design.
+{extra_lines}- Seed strategy:
+{seed_strategy_text}
+- Use the source idea pool to combine or intensify promising ideas via code changes, not only by retuning configs.
+- Improve from the current best code state when available.
+
+Source idea pool:
+{source_idea_pool_text}
+
+Source best:
+{source_best_section}
+"""
+
+    return (
+        f"""Continue the same single-agent research thread in {repo_root}.
 
 Context:
 - tier={tier}
@@ -1288,6 +1510,9 @@ Keep these rules active:
 - If loop progress says `recommended_runtime_tier=long`, use `long` by default for finalist tie-down unless there is a strong reason to stay in `medium`.
 - Do not tune on test, edit benchmark scripts, or change datasets/splits.
 - Do not choose done early. If more than about {done_guard_minutes} minutes remain before {deadline_utc} and meaningful directions still exist, keep searching.
+"""
+        + code_flow_section
+        + f"""
 
 Runtime tiers:
 {runtime_tier_text}
@@ -1310,14 +1535,15 @@ Status:
 Recent results:
 {results_tail}
 
-Experiment summary:
-{read_text_limited(repo_root / "experiment_summary.tsv", max_chars=5000) if (repo_root / "experiment_summary.tsv").exists() else "experiment_summary.tsv does not exist yet."}
+Local experiment summary:
+{local_summary_text}
 
 Current best:
 {best_section}
 
 Return JSON only.
 """
+    )
 
 
 def call_codex(
@@ -1556,6 +1782,8 @@ def execute_wrapper_action(
         command = [
             str(controller_python),
             str(run_loop_path),
+            "--settings-path",
+            str(resolve_repo_path(repo_root, str(app_cfg.get("settings_path", "config.json")))),
             "baseline",
             "--tier",
             selected_tier,
@@ -1565,7 +1793,9 @@ def execute_wrapper_action(
         return outcome
 
     if kind == "run_config":
-        config_path = normalize_generated_config_path(repo_root, str(action["config_path"]))
+        generated_root_dir = str(app_cfg.get("generated_config_dir", "generated_configs"))
+        canonical_config_path = canonicalize_generated_config_path(str(action["config_path"]), generated_root_dir)
+        config_path = normalize_generated_config_path(repo_root, canonical_config_path, generated_root_dir)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_text = sanitize_config_yaml_text(str(action["config_yaml"]))
         candidate_cfg = load_yaml_mapping_from_text(yaml_text)
@@ -1625,13 +1855,26 @@ def execute_wrapper_action(
                 f"Changed axes={sorted(changed_axes)}. Propose another family, a same-family broad jump, or benchmark src code_edits."
             )
         config_path.write_text(yaml_text, encoding="utf-8")
-        if code_edits and search_space_name != "open":
-            raise PolicyRejectError("code_edits are allowed only in open search")
+        if code_edits and search_space_name not in {"open", "code", "aggressive"}:
+            raise PolicyRejectError("code_edits are allowed only in open, code, or aggressive search")
+        if search_space_name in {"code", "aggressive"} and not code_edits and results:
+            raise PolicyRejectError(
+                "code-flow is code-first after the initial seed/control step; propose benchmark src code_edits for this run"
+            )
+        if search_space_name == "aggressive" and code_edits:
+            edited_paths_raw = [str(edit.get("path", "")).replace("\\", "/").lower() for edit in code_edits]
+            non_loss_edit = any("/loss" not in path and not path.endswith("loss.py") for path in edited_paths_raw)
+            if not non_loss_edit:
+                raise PolicyRejectError(
+                    "aggressive-flow requires broader benchmark src implementation than loss-only edits; add a head, fusion, aggregation, auxiliary branch, or other bounded component"
+                )
 
         label = str(action.get("label", "")).strip() or "candidate"
         command = [
             str(controller_python),
             str(run_loop_path),
+            "--settings-path",
+            str(resolve_repo_path(repo_root, str(app_cfg.get("settings_path", "config.json")))),
             "run-config",
             "--config",
             str(config_path),
@@ -1736,6 +1979,8 @@ def execute_wrapper_action(
         command = [
             str(controller_python),
             str(run_loop_path),
+            "--settings-path",
+            str(resolve_repo_path(repo_root, str(app_cfg.get("settings_path", "config.json")))),
             "test",
             "--experiment-id",
             experiment_id,
@@ -1754,7 +1999,8 @@ def execute_wrapper_action(
 
     if kind == "download_file":
         url = str(action["download_url"]).strip()
-        dest_path = normalize_download_path(repo_root, str(action["download_path"]))
+        downloads_root_dir = str(app_cfg.get("downloads_dir", "downloads"))
+        dest_path = normalize_download_path(repo_root, str(action["download_path"]), downloads_root_dir)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         log_path = logs_dir / f"{cycle_slug}.log"
         started = time.time()
@@ -1779,9 +2025,18 @@ def collect_status_snapshot(
     *,
     repo_root: pathlib.Path,
     controller_python: pathlib.Path,
+    app_config_path: pathlib.Path,
     env: dict[str, str],
 ) -> str:
-    cmd = [str(controller_python), str(repo_root / "run_loop.py"), "status", "--limit", "8"]
+    cmd = [
+        str(controller_python),
+        str(repo_root / "run_loop.py"),
+        "--settings-path",
+        str(app_config_path),
+        "status",
+        "--limit",
+        "8",
+    ]
     rc, output = run_capture(cmd=cmd, cwd=repo_root, env=env)
     if rc == 0:
         return output or "status produced no output"
@@ -1793,20 +2048,33 @@ def main() -> int:
     parser.add_argument("--config-path", default="config/codex_loop.json")
     parser.add_argument("--tier", default="medium")
     parser.add_argument("--hours", type=float, default=8.0)
-    parser.add_argument("--search-space", choices=["open", "limited"], default="open")
+    parser.add_argument("--search-space", choices=["open", "limited", "code", "aggressive"], default="open")
+    parser.add_argument("--seed-parent-experiment-id", default="")
+    parser.add_argument("--start-from-scratch", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
     loop_cfg = load_json(resolve_repo_path(repo_root, args.config_path))
-    app_cfg = load_json(repo_root / "config.json")
+    app_config_path = resolve_repo_path(repo_root, str(loop_cfg.get("app_config_path", "config.json")))
+    source_app_config_path = resolve_repo_path(
+        repo_root,
+        str(loop_cfg.get("source_app_config_path", str(app_config_path))),
+    )
+    app_cfg = load_app_config(repo_root, str(app_config_path))
+    app_cfg["settings_path"] = rel_or_abs(app_config_path, repo_root)
+    source_app_cfg = load_app_config(repo_root, str(source_app_config_path))
+    source_app_cfg["settings_path"] = rel_or_abs(source_app_config_path, repo_root)
 
     benchmark_repo_root = resolve_repo_path(repo_root, str(app_cfg["benchmark_repo_root"]))
     benchmark_python = resolve_repo_path(repo_root, str(app_cfg["benchmark_python_exe"]))
     controller_python = resolve_repo_path(repo_root, str(loop_cfg["controller_python_exe"]))
     results_path = resolve_repo_path(repo_root, str(app_cfg["results_file"]))
+    source_results_path = resolve_repo_path(repo_root, str(source_app_cfg["results_file"]))
+    summary_path = resolve_repo_path(repo_root, str(app_cfg.get("summary_file", "experiment_summary.tsv")))
+    source_summary_path = resolve_repo_path(repo_root, str(source_app_cfg.get("summary_file", "experiment_summary.tsv")))
     logs_dir = ensure_dir(resolve_repo_path(repo_root, str(app_cfg["logs_dir"])))
-    ensure_dir(repo_root / "downloads")
+    ensure_dir(resolve_repo_path(repo_root, str(app_cfg.get("downloads_dir", "downloads"))))
     auto_repair_enabled = bool(loop_cfg.get("auto_repair_enabled", True))
     auto_repair_retry_on_success = bool(loop_cfg.get("auto_repair_retry_on_success", True))
     auto_repair_allow_direct_module_install = bool(loop_cfg.get("auto_repair_allow_direct_module_install", True))
@@ -1833,7 +2101,14 @@ def main() -> int:
     session_state_file = resolve_repo_path(repo_root, str(loop_cfg["session_state_file"]))
     stop_flag_file = resolve_repo_path(repo_root, str(loop_cfg["stop_flag_file"]))
 
-    search_space_doc = repo_root / ("search_space_limited.md" if args.search_space == "limited" else "search_space_open.md")
+    if args.search_space == "limited":
+        search_space_doc = repo_root / "search_space_limited.md"
+    elif args.search_space == "code":
+        search_space_doc = repo_root / "search_space_code.md"
+    elif args.search_space == "aggressive":
+        search_space_doc = repo_root / "search_space_aggressive.md"
+    else:
+        search_space_doc = repo_root / "search_space_open.md"
     if not controller_python.exists():
         raise SystemExit(f"controller python not found: {controller_python}")
     if not benchmark_repo_root.exists():
@@ -1868,13 +2143,46 @@ def main() -> int:
     baseline_config_path = benchmark_baseline_config_path(repo_root, app_cfg, benchmark_repo_root)
     baseline_config_text = read_text_limited(baseline_config_path, max_chars=6000)
     search_space_text = read_text_limited(search_space_doc, max_chars=8000)
-    status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python, env=runtime_env)
+    status_output = collect_status_snapshot(
+        repo_root=repo_root,
+        controller_python=controller_python,
+        app_config_path=app_config_path,
+        env=runtime_env,
+    )
     best_context = extract_best_config_context(
         repo_root=repo_root,
         results_path=results_path,
         tier=args.tier,
         metric_key=metric_key,
     )
+    source_best_context = extract_best_config_context(
+        repo_root=repo_root,
+        results_path=source_results_path,
+        tier=args.tier,
+        metric_key=metric_key,
+    )
+    local_summary_text = read_text_limited(summary_path, max_chars=5000) if summary_path.exists() else f"{summary_path.name} does not exist yet."
+    source_idea_pool_text = format_idea_pool(
+        build_idea_pool(
+            results_path=source_results_path,
+            summary_path=source_summary_path,
+            tier=args.tier,
+            metric_key=metric_key,
+            max_items=int(loop_cfg.get("max_idea_pool_items", 10)),
+        )
+    )
+    seed_parent = str(args.seed_parent_experiment_id).strip()
+    if not seed_parent and args.search_space in {"code", "aggressive"} and not args.start_from_scratch:
+        seed_parent = source_best_context.get("experiment_id", "")
+    if args.search_space in {"code", "aggressive"}:
+        if args.start_from_scratch:
+            seed_strategy_text = "- start_from_scratch=true; use a scratch baseline/control first, then switch to code_edits on later cycles."
+        elif seed_parent:
+            seed_strategy_text = f"- default parent is {seed_parent}; seed from that experiment unless a stronger code-flow best already exists locally."
+        else:
+            seed_strategy_text = "- no explicit seed found; use a scratch baseline/control first, then switch to code_edits."
+    else:
+        seed_strategy_text = "- not applicable outside code-flow."
     progress = build_progress_snapshot(
         repo_root=repo_root,
         results_path=results_path,
@@ -1905,6 +2213,10 @@ def main() -> int:
         "benchmark_repo_root": str(benchmark_repo_root),
         "auto_repair_enabled": auto_repair_enabled,
         "runtime_env_overrides": loop_cfg.get("runtime_env", {}),
+        "app_config_path": str(app_config_path),
+        "source_app_config_path": str(source_app_config_path),
+        "seed_parent_experiment_id": seed_parent,
+        "start_from_scratch": bool(args.start_from_scratch),
         "progress": progress,
         "session_log": str(session_log),
         "cycles": [],
@@ -1926,7 +2238,11 @@ def main() -> int:
         status_output=status_output,
         results_tail=latest_results_summary(results_path),
         best_context=best_context,
+        source_best_context=source_best_context,
+        local_summary_text=local_summary_text,
+        source_idea_pool_text=source_idea_pool_text,
         progress_text=progress_text,
+        seed_strategy_text=seed_strategy_text,
     )
     if args.dry_run:
         session_log.write_text(prompt, encoding="utf-8")
@@ -2049,12 +2365,33 @@ def main() -> int:
                 "telemetry": {},
             }
 
-        status_output = collect_status_snapshot(repo_root=repo_root, controller_python=controller_python, env=runtime_env)
+        status_output = collect_status_snapshot(
+            repo_root=repo_root,
+            controller_python=controller_python,
+            app_config_path=app_config_path,
+            env=runtime_env,
+        )
         best_context = extract_best_config_context(
             repo_root=repo_root,
             results_path=results_path,
             tier=args.tier,
             metric_key=metric_key,
+        )
+        source_best_context = extract_best_config_context(
+            repo_root=repo_root,
+            results_path=source_results_path,
+            tier=args.tier,
+            metric_key=metric_key,
+        )
+        local_summary_text = read_text_limited(summary_path, max_chars=5000) if summary_path.exists() else f"{summary_path.name} does not exist yet."
+        source_idea_pool_text = format_idea_pool(
+            build_idea_pool(
+                results_path=source_results_path,
+                summary_path=source_summary_path,
+                tier=args.tier,
+                metric_key=metric_key,
+                max_items=int(loop_cfg.get("max_idea_pool_items", 10)),
+            )
         )
         previous_cycle_summary = (
             str(execution.get("message", "")).strip()
@@ -2115,10 +2452,14 @@ def main() -> int:
             status_output=status_output,
             results_tail=latest_results_summary(results_path),
             best_context=best_context,
+            source_best_context=source_best_context,
             previous_cycle_summary=previous_cycle_summary,
             previous_action=previous_action,
             previous_execution=previous_execution,
+            local_summary_text=local_summary_text,
+            source_idea_pool_text=source_idea_pool_text,
             progress_text=progress_text,
+            seed_strategy_text=seed_strategy_text,
         )
         if pause_seconds > 0:
             time.sleep(pause_seconds)

@@ -60,6 +60,17 @@ class AutoRepairHelpersTests(unittest.TestCase):
         self.assertTrue(pathlib.Path(env["TMP"]).exists())
         self.assertEqual(env["HF_HUB_DISABLE_SYMLINKS_WARNING"], "1")
 
+    def test_list_allowed_runtime_tiers_uses_code_search_key(self) -> None:
+        tiers = codex_loop.list_allowed_runtime_tiers(
+            {
+                "code_search_runtime_tiers": ["medium", "long", "ghost"],
+                "open_search_runtime_tiers": ["smoke"],
+            },
+            "code",
+            {"runtime_tiers": {"medium": {}, "long": {}, "smoke": {}}},
+        )
+        self.assertEqual(tiers, ["medium", "long"])
+
     def test_recent_cycles_without_web_search_counts_tail(self) -> None:
         cycles = [
             {"telemetry": {"used_web_search": True}},
@@ -113,6 +124,61 @@ class AutoRepairHelpersTests(unittest.TestCase):
         text = "Traceback\nModuleNotFoundError: No module named 'segmentation_models_pytorch'\n"
         self.assertEqual(codex_loop.extract_missing_module(text), "segmentation_models_pytorch")
 
+    def test_build_idea_pool_includes_review_alternates_and_excludes_crashes(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "idea_pool_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            results_path = tmp_dir / "results.tsv"
+            summary_path = tmp_dir / "experiment_summary.tsv"
+            results_path.write_text(
+                "\n".join(
+                    [
+                        "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes",
+                        "e0001\t\tbaseline\tmedium\t\t\t\troc_auc_presence\t0.70\t1\t1\tbaseline",
+                        "e0002\te0001\tkeep\tmedium\t\t\t\troc_auc_presence\t0.91\t1\t1\tbest",
+                        "e0003\te0002\tdiscard\tmedium\t\t\t\troc_auc_presence\t0.90\t1\t1\treview-worthy alternate vs e0002",
+                        "e0004\te0002\tcrash\tmedium\t\t\t\troc_auc_presence\t\t1\t1\tboom",
+                        "e0005\te0002\tkeep\tlong\t\t\t\troc_auc_presence\t0.99\t1\t1\twrong tier",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            summary_path.write_text(
+                "\n".join(
+                    [
+                        "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tmodel_name\tmodel_backbone\tmodel_pretrained\tmodel_pretrained_backbone\tmodel_base_channels\tmodel_cls_hidden\tmodel_cls_dropout\tinput_image_size\tinput_preserve_aspect\tbatch_size\tepochs\tlearning_rate\tmin_lr\tweight_decay\tscheduler\taugment\tbalanced_sampling\tpatch_enabled\tpatch_size\tpatch_positive_prob\tpatch_hard_negative_prob\tpatch_hard_negative_quantile\tloss_name\tbce_weight\tdice_weight\tdice_positive_only\tpresence_bce_weight\tpresence_bce_warmup_epochs\teval_threshold\teval_tta\teval_presence_score_mode\teval_presence_topk_frac\teval_presence_threshold\truntime_device\truntime_amp\tconfig_path\tresolved_config_path\tnotes",
+                        "e0001\t\tbaseline\tmedium\troc_auc_presence\t0.70\t1\t1\tsimple_unet\t\t\t\t\t\t\t256\t\t2\t12\t\t\t\t\t\t\tfalse\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tbaseline",
+                        "e0002\te0001\tkeep\tmedium\troc_auc_presence\t0.91\t1\t1\tfpn\tresnet50\t\t\t\t\t\t320\t\t2\t35\t\t\t\tcosine\t\t\ttrue\t\t\t\t\t\t\t\t\t0.4\t\t\t\t\t\t\t\t\t\t\tbest",
+                        "e0003\te0002\tdiscard\tmedium\troc_auc_presence\t0.90\t1\t1\tpspnet\tresnet101\t\t\t\t\t\t416\t\t1\t50\t\t\t\tcosine\t\t\ttrue\t\t\t\t\t\t\t\t\t0.6\t\t\t\t\t\t\t\t\t\t\treview",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            pool = codex_loop.build_idea_pool(
+                results_path=results_path,
+                summary_path=summary_path,
+                tier="medium",
+                metric_key="roc_auc_presence",
+                max_items=2,
+            )
+            self.assertEqual([item["experiment_id"] for item in pool], ["e0002", "e0001"])
+            expanded = codex_loop.build_idea_pool(
+                results_path=results_path,
+                summary_path=summary_path,
+                tier="medium",
+                metric_key="roc_auc_presence",
+                max_items=5,
+            )
+            self.assertEqual([item["experiment_id"] for item in expanded], ["e0002", "e0001", "e0003"])
+            self.assertNotIn("e0004", [item["experiment_id"] for item in expanded])
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_extract_unsupported_model_name(self) -> None:
         text = "ValueError: Unsupported model.name: unet_resnet34"
         self.assertEqual(codex_loop.extract_unsupported_model_name(text), "unet_resnet34")
@@ -122,6 +188,13 @@ class AutoRepairHelpersTests(unittest.TestCase):
         normalized = codex_loop.normalize_config_yaml_text(raw)
         self.assertIn("model:\n  name: simple_unet", normalized)
         self.assertNotIn("\\n", normalized)
+
+    def test_canonicalize_generated_config_path_rewrites_open_dir_for_code_flow(self) -> None:
+        rewritten = codex_loop.canonicalize_generated_config_path(
+            "generated_configs/sample.yaml",
+            "generated_configs_code",
+        )
+        self.assertEqual(rewritten, str(pathlib.Path("generated_configs_code") / "sample.yaml"))
 
     def test_sanitize_config_yaml_text_repairs_common_stray_prefix_glitch(self) -> None:
         raw = (
@@ -539,6 +612,294 @@ class AutoRepairHelpersTests(unittest.TestCase):
             self.assertIn("input_scale", outcome["changed_axes"])
             self.assertIn("training_budget", outcome["changed_axes"])
             mocked_run.assert_called_once()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_code_flow_allows_seed_control_without_code_edits(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "code_seed_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "generated_configs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "logs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "benchmark" / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "results_code.tsv").write_text(
+            "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes\n",
+            encoding="utf-8",
+        )
+        try:
+            with mock.patch.object(codex_loop, "run_logged_command", return_value={"returncode": 0}) as mocked_run:
+                outcome = codex_loop.execute_wrapper_action(
+                    action={
+                        "action": "run_config",
+                        "label": "code_seed",
+                        "runtime_tier": "medium",
+                        "config_path": "generated_configs_code/seed.yaml",
+                        "config_yaml": "model:\n  name: fpn\n",
+                        "code_edits": [],
+                    },
+                    repo_root=tmp_dir,
+                    app_cfg={
+                        "runtime_tiers": {"medium": {}},
+                        "results_file": "results_code.tsv",
+                        "generated_config_dir": "generated_configs_code",
+                        "downloads_dir": "downloads_code",
+                        "settings_path": "config_code.json",
+                        "selection_metric": "roc_auc_presence",
+                    },
+                    benchmark_repo_root=tmp_dir / "benchmark",
+                    benchmark_python=pathlib.Path("python"),
+                    controller_python=pathlib.Path("python"),
+                    default_tier="medium",
+                    search_space_name="code",
+                    cycle_index=1,
+                    logs_dir=tmp_dir / "logs_code",
+                    auto_repair_enabled=False,
+                    auto_repair_retry_on_success=False,
+                    auto_repair_allow_direct_module_install=False,
+                    auto_repair_module_package_map={},
+                    auto_repair_module_alias_map={},
+                    auto_repair_model_package_map={},
+                    auto_repair_model_fallback_map={},
+                    runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
+                )
+            self.assertEqual(outcome["status"], "executed")
+            self.assertTrue((tmp_dir / "generated_configs_code" / "seed.yaml").exists())
+            command = mocked_run.call_args.kwargs["cmd"]
+            self.assertIn(str((tmp_dir / "config_code.json").resolve()), command)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_code_flow_rewrites_generated_configs_prefix(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "code_rewrite_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "generated_configs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "logs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "benchmark" / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "results_code.tsv").write_text(
+            "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes\n",
+            encoding="utf-8",
+        )
+        try:
+            with mock.patch.object(codex_loop, "run_logged_command", return_value={"returncode": 0}) as mocked_run:
+                outcome = codex_loop.execute_wrapper_action(
+                    action={
+                        "action": "run_config",
+                        "label": "code_seed",
+                        "runtime_tier": "medium",
+                        "config_path": "generated_configs/seed.yaml",
+                        "config_yaml": "model:\n  name: fpn\n",
+                        "code_edits": [],
+                    },
+                    repo_root=tmp_dir,
+                    app_cfg={
+                        "runtime_tiers": {"medium": {}},
+                        "results_file": "results_code.tsv",
+                        "generated_config_dir": "generated_configs_code",
+                        "downloads_dir": "downloads_code",
+                        "settings_path": "config_code.json",
+                        "selection_metric": "roc_auc_presence",
+                    },
+                    benchmark_repo_root=tmp_dir / "benchmark",
+                    benchmark_python=pathlib.Path("python"),
+                    controller_python=pathlib.Path("python"),
+                    default_tier="medium",
+                    search_space_name="code",
+                    cycle_index=1,
+                    logs_dir=tmp_dir / "logs_code",
+                    auto_repair_enabled=False,
+                    auto_repair_retry_on_success=False,
+                    auto_repair_allow_direct_module_install=False,
+                    auto_repair_module_package_map={},
+                    auto_repair_module_alias_map={},
+                    auto_repair_model_package_map={},
+                    auto_repair_model_fallback_map={},
+                    runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
+                )
+            self.assertEqual(outcome["status"], "executed")
+            self.assertTrue((tmp_dir / "generated_configs_code" / "seed.yaml").exists())
+            command = mocked_run.call_args.kwargs["cmd"]
+            self.assertIn(str((tmp_dir / "generated_configs_code" / "seed.yaml").resolve()), command)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_code_flow_rejects_config_only_after_seed(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "code_reject_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "generated_configs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "logs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "benchmark" / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "results_code.tsv").write_text(
+            "\n".join(
+                [
+                    "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes",
+                    "e0001\t\tbaseline\tmedium\tgenerated_configs_code/seed.yaml\t\t\troc_auc_presence\t0.70\t1\t1\tbaseline",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            with mock.patch.object(codex_loop, "run_logged_command") as mocked_run:
+                with self.assertRaisesRegex(codex_loop.PolicyRejectError, "code-flow is code-first"):
+                    codex_loop.execute_wrapper_action(
+                        action={
+                            "action": "run_config",
+                            "label": "code_retry",
+                            "runtime_tier": "medium",
+                            "config_path": "generated_configs_code/retry.yaml",
+                            "config_yaml": "model:\n  name: fpn\n",
+                            "code_edits": [],
+                        },
+                        repo_root=tmp_dir,
+                        app_cfg={
+                            "runtime_tiers": {"medium": {}},
+                            "results_file": "results_code.tsv",
+                            "generated_config_dir": "generated_configs_code",
+                            "downloads_dir": "downloads_code",
+                            "settings_path": "config_code.json",
+                            "selection_metric": "roc_auc_presence",
+                        },
+                        benchmark_repo_root=tmp_dir / "benchmark",
+                        benchmark_python=pathlib.Path("python"),
+                        controller_python=pathlib.Path("python"),
+                        default_tier="medium",
+                        search_space_name="code",
+                        cycle_index=2,
+                        logs_dir=tmp_dir / "logs_code",
+                        auto_repair_enabled=False,
+                        auto_repair_retry_on_success=False,
+                        auto_repair_allow_direct_module_install=False,
+                        auto_repair_module_package_map={},
+                        auto_repair_module_alias_map={},
+                        auto_repair_model_package_map={},
+                        auto_repair_model_fallback_map={},
+                        runtime_env={},
+                        same_family_micro_tweak_streak=6,
+                        same_family_broad_jump_min_axes=2,
+                    )
+                mocked_run.assert_not_called()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_code_flow_accepts_code_edits_after_seed(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "code_edit_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "generated_configs_code").mkdir(parents=True, exist_ok=True)
+        (tmp_dir / "logs_code").mkdir(parents=True, exist_ok=True)
+        target = tmp_dir / "benchmark" / "src" / "demo.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_dir / "results_code.tsv").write_text(
+            "\n".join(
+                [
+                    "experiment_id\tparent_experiment_id\tstatus\truntime_tier\tconfig_path\tresolved_config_path\tcheckpoint_path\tval_metric_key\tval_metric_value\ttrain_seconds\ttotal_seconds\tnotes",
+                    "e0001\t\tkeep\tmedium\tgenerated_configs_code/seed.yaml\t\t\troc_auc_presence\t0.80\t1\t1\tseed",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            with mock.patch.object(codex_loop, "run_logged_command", return_value={"returncode": 0}) as mocked_run:
+                outcome = codex_loop.execute_wrapper_action(
+                    action={
+                        "action": "run_config",
+                        "label": "code_edit_followup",
+                        "runtime_tier": "medium",
+                        "config_path": "generated_configs_code/followup.yaml",
+                        "config_yaml": "model:\n  name: fpn\n",
+                        "parent_experiment_id": "e0001",
+                        "code_edits": [{"path": "src/demo.py", "content": "VALUE = 2\n"}],
+                    },
+                    repo_root=tmp_dir,
+                    app_cfg={
+                        "runtime_tiers": {"medium": {}},
+                        "results_file": "results_code.tsv",
+                        "generated_config_dir": "generated_configs_code",
+                        "downloads_dir": "downloads_code",
+                        "settings_path": "config_code.json",
+                        "selection_metric": "roc_auc_presence",
+                    },
+                    benchmark_repo_root=tmp_dir / "benchmark",
+                    benchmark_python=pathlib.Path("python"),
+                    controller_python=pathlib.Path("python"),
+                    default_tier="medium",
+                    search_space_name="code",
+                    cycle_index=2,
+                    logs_dir=tmp_dir / "logs_code",
+                    auto_repair_enabled=False,
+                    auto_repair_retry_on_success=False,
+                    auto_repair_allow_direct_module_install=False,
+                    auto_repair_module_package_map={},
+                    auto_repair_module_alias_map={},
+                    auto_repair_model_package_map={},
+                    auto_repair_model_fallback_map={},
+                    runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
+                )
+            self.assertEqual(outcome["status"], "executed")
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+            self.assertEqual(outcome["code_edit_paths"], ["src\\demo.py"])
+            mocked_run.assert_called_once()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_execute_wrapper_action_test_uses_settings_path(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "test_settings_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        (tmp_dir / "logs_code").mkdir(parents=True, exist_ok=True)
+        try:
+            with mock.patch.object(codex_loop, "run_logged_command", return_value={"returncode": 0}) as mocked_run:
+                outcome = codex_loop.execute_wrapper_action(
+                    action={
+                        "action": "test",
+                        "experiment_id": "e0018",
+                    },
+                    repo_root=tmp_dir,
+                    app_cfg={
+                        "runtime_tiers": {"medium": {}},
+                        "results_file": "results_code.tsv",
+                        "generated_config_dir": "generated_configs_code",
+                        "downloads_dir": "downloads_code",
+                        "settings_path": "config_code.json",
+                        "selection_metric": "roc_auc_presence",
+                    },
+                    benchmark_repo_root=tmp_dir / "benchmark",
+                    benchmark_python=pathlib.Path("python"),
+                    controller_python=pathlib.Path("python"),
+                    default_tier="medium",
+                    search_space_name="code",
+                    cycle_index=3,
+                    logs_dir=tmp_dir / "logs_code",
+                    auto_repair_enabled=False,
+                    auto_repair_retry_on_success=False,
+                    auto_repair_allow_direct_module_install=False,
+                    auto_repair_module_package_map={},
+                    auto_repair_module_alias_map={},
+                    auto_repair_model_package_map={},
+                    auto_repair_model_fallback_map={},
+                    runtime_env={},
+                    same_family_micro_tweak_streak=6,
+                    same_family_broad_jump_min_axes=2,
+                )
+            self.assertEqual(outcome["status"], "executed")
+            command = mocked_run.call_args.kwargs["cmd"]
+            self.assertEqual(command[2], "--settings-path")
+            self.assertIn(str((tmp_dir / "config_code.json").resolve()), command)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

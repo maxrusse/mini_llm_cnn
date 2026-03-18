@@ -16,6 +16,7 @@ This repo is an autonomous config-only research loop for `xray_fracture_benchmar
 - You may use web search to pull in fitting ideas from other domains when the transfer case is plausible, including methods from general segmentation, detection, dense prediction, remote sensing, document vision, industrial inspection, or foundation-model literature.
 - In `open` mode, you should actually use web search during the run instead of staying fully local.
 - In `open` mode, you may include benchmark `src/` code edits through `run_config.code_edits` when that is the best data-driven way to test a method idea.
+- In `code` mode, the flow is explicitly implementation-focused: it should read the best kept runs plus review-worthy alternates, then improve them with benchmark `src/` code edits instead of continuing broad config-only search.
 - Those code edits may be larger than a tiny tweak when justified: new helper functions, new heads, new model classes, or full benchmark-side pipeline components are allowed if they stay within the benchmark contract and are paired with a concrete run.
 - Longer programming work is allowed when it is the most feasible route to a strong experiment. The loop does not need to restrict itself to only tiny edits if a larger bounded implementation is what the hypothesis requires.
 - You may request narrowly scoped package installs into `xray_fracture_benchmark_venv` and downloads of pretrained weights or papers if they are directly tied to a concrete experiment path.

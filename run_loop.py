@@ -319,6 +319,7 @@ def rel_or_abs(path: pathlib.Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Minimal config-only loop for xray_fracture_benchmark.")
+    parser.add_argument("--settings-path", default=str(CONFIG_PATH))
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="Show current loop status.")
@@ -357,10 +358,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_settings() -> dict[str, Any]:
-    data = load_json(CONFIG_PATH, None)
+def load_settings(settings_path: pathlib.Path | None = None) -> dict[str, Any]:
+    target = settings_path or CONFIG_PATH
+    data = load_json(target, None)
     if not isinstance(data, dict):
-        raise LoopError(f"Missing or invalid config.json: {CONFIG_PATH}")
+        raise LoopError(f"Missing or invalid settings file: {target}")
     return data
 
 
@@ -1324,12 +1326,14 @@ def do_run_config(
     ensure_results_header(paths["results_file"])
     state = load_state(paths["state_file"])
     results = read_results(paths["results_file"], create=True)
-    if current_best_result(
+    allow_bootstrap = bool(settings.get("allow_run_config_bootstrap", False))
+    current_best = current_best_result(
         results,
         tier,
         str(settings["selection_metric"]),
         metric_keys=selection_metric_priority(settings),
-    ) is None:
+    )
+    if current_best is None and not allow_bootstrap:
         raise LoopError(f"No baseline for tier '{tier}'. Run baseline first.")
     raw_path = pathlib.Path(config_arg)
     if raw_path.is_absolute():
@@ -1349,6 +1353,8 @@ def do_run_config(
         tier=tier,
     )
     note = append_note(f"manual config from {candidate_path.name}", note_suffix)
+    if current_best is None and allow_bootstrap:
+        note = append_note(note, "bootstrap first run-config for empty tier ledger")
     row = execute_experiment(
         experiment_id=experiment_id,
         parent_experiment_id=parent_experiment_id,
@@ -1360,7 +1366,7 @@ def do_run_config(
         paths=paths,
         state=state,
         dry_run=dry_run,
-        keep_on_first=False,
+        keep_on_first=current_best is None and allow_bootstrap,
     )
     if not dry_run:
         save_state(paths["state_file"], state)
@@ -1466,7 +1472,7 @@ def do_test(settings: dict[str, Any], paths: dict[str, pathlib.Path], experiment
 
 def main() -> int:
     args = parse_args()
-    settings = load_settings()
+    settings = load_settings(resolve_from_repo(str(args.settings_path)))
     paths = ensure_settings_paths(settings)
 
     try:
