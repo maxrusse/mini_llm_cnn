@@ -19,6 +19,7 @@ It is designed to be much simpler than `llm_driven_cnns`: a single Codex agent o
 - lets open search use a small coherent bundle of changes when that is faster than one-scalar-at-a-time search
 - supports unattended overnight search
 - keeps Torch, Hugging Face, pip, and temp caches under `.mini_loop/` by default so model downloads and temp files stay inside the repo workspace
+- auto-recovers once from a remote Codex thread context overflow by clearing the saved thread id, starting a fresh thread, and continuing from local repo state
 
 ## What It Does Not Do
 - it does not edit benchmark runner scripts automatically or arbitrarily
@@ -125,6 +126,30 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - `search_space_code.md`: code-flow policy
 - `search_space_aggressive.md`: aggressive code-flow policy
 
+## General Build Shape
+This repo is intentionally file-based and small, but the core platform pieces are already separated:
+
+- `search policy`: `program.md` plus the search-space documents decide what Codex should propose next
+- `execution wrapper`: `scripts/codex_loop.py` handles thread lifecycle, prompt assembly, retries, and action dispatch
+- `experiment runner`: `run_loop.py` executes baseline, run-config, install, download, status, and test actions
+- `artifact store`: configs, logs, checkpoints, metrics, and ledgers live in predictable repo-local folders
+- `session state`: `.mini_loop/` holds Codex login state, thread ids, session files, stop files, and cache roots
+- `policy layer`: wrapper checks enforce runtime-bucket comparison, plateau broadening, and explicit finalist-only test use
+
+The key design choice is that remote LLM state is disposable, but local experiment state is not. The ledger, artifacts, and local session files are the durable source of truth.
+
+## Upcoming Modularization
+If this gets rebuilt into a real platform, the clean split is:
+
+- `planner service`: assembles context and produces the next structured action
+- `execution service`: runs approved actions, benchmark commands, and bounded repair steps
+- `experiment registry`: owns experiment rows, parent-child links, keep/discard decisions, and summaries
+- `artifact service`: owns configs, metrics, logs, checkpoints, archive exports, and reproducibility bundles
+- `session service`: owns Codex login state, thread resumption, compaction failures, and fresh-thread rotation
+- `policy engine`: owns allowed actions, plateau rules, evaluation restrictions, and finalist gates
+
+The new overflow retry behavior matters here: session restart is an infrastructure concern, not a search-policy concern. That should stay modular when this gets platformized.
+
 ## Outputs
 - `generated_configs/`: generated YAML configs
 - `logs/`: train/validate/test logs
@@ -142,6 +167,7 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - `results_aggressive.tsv`: aggressive-flow experiment ledger
 - `experiment_summary_aggressive.tsv`: aggressive-flow summary ledger
 - `.mini_loop/autofix_configs/`: wrapper-generated retry configs when model-name fallback is applied
+- `logs*/codex_thread_reset.log`: thread-reset telemetry when the wrapper rotates to a fresh Codex thread after a context overflow
 
 ## Rules
 - baseline first
@@ -157,6 +183,7 @@ bash ./scripts/start_codex_loop.sh --tier medium --hours 8 --search-space limite
 - same-family broad jumps remain allowed after plateau when they change multiple meaningful axes such as pretraining, resolution, training budget, sampling, or loss structure
 - if plateau persists without any benchmark `src/` experiments, the loop should escalate toward `code_edits` instead of ending the session
 - policy-rejected proposals should be logged and fed back into the next prompt, not treated as terminal blockers
+- a remote Codex context overflow is an infra event; the wrapper may clear the saved thread id and retry once on a fresh thread while preserving local experiment state
 - run locked test only on selected kept or baseline experiments
 - create `.mini_loop/STOP_CODEX_LOOP` if you want the loop to stop after the current cycle
 

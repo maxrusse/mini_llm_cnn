@@ -134,6 +134,13 @@ def try_read_text(path: pathlib.Path) -> str:
         return ""
 
 
+def is_context_overflow_error(message: str) -> bool:
+    text = str(message or "").lower()
+    if "context_length_exceeded" in text:
+        return True
+    return "context window" in text and "exceed" in text
+
+
 def read_text_limited(path: pathlib.Path, *, max_chars: int = 8000) -> str:
     text = try_read_text(path).strip()
     if len(text) <= max_chars:
@@ -1727,6 +1734,94 @@ def call_codex(
     raise RuntimeError("codex runner failed: " + "; ".join(details))
 
 
+def reset_codex_thread_state(*, thread_id_file: pathlib.Path, logs_dir: pathlib.Path, reason: str) -> str:
+    previous_thread_id = try_read_text(thread_id_file).strip()
+    if thread_id_file.exists():
+        thread_id_file.unlink()
+    reset_log = logs_dir / "codex_thread_reset.log"
+    with reset_log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "ts_utc": utc_now(),
+                    "reason": str(reason).strip(),
+                    "previous_thread_id": previous_thread_id,
+                },
+                ensure_ascii=True,
+            )
+            + "\n"
+        )
+    return previous_thread_id
+
+
+def call_codex_with_fresh_thread_retry(
+    *,
+    codex_exe: str,
+    repo_root: pathlib.Path,
+    codex_home: pathlib.Path,
+    thread_id_file: pathlib.Path,
+    logs_dir: pathlib.Path,
+    model: str,
+    reasoning_effort: str,
+    web_search_mode: str,
+    network_access_enabled: bool,
+    sandbox_mode: str,
+    skip_git_repo_check: bool,
+    add_dirs: list[pathlib.Path],
+    prompt: str,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    try:
+        return call_codex(
+            codex_exe=codex_exe,
+            repo_root=repo_root,
+            codex_home=codex_home,
+            thread_id_file=thread_id_file,
+            logs_dir=logs_dir,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            web_search_mode=web_search_mode,
+            network_access_enabled=network_access_enabled,
+            sandbox_mode=sandbox_mode,
+            skip_git_repo_check=skip_git_repo_check,
+            add_dirs=add_dirs,
+            prompt=prompt,
+            env=env,
+        )
+    except Exception as exc:
+        if not is_context_overflow_error(str(exc)):
+            raise
+        previous_thread_id = try_read_text(thread_id_file).strip()
+        if not previous_thread_id:
+            raise
+        reset_codex_thread_state(
+            thread_id_file=thread_id_file,
+            logs_dir=logs_dir,
+            reason="context_length_exceeded",
+        )
+        result = call_codex(
+            codex_exe=codex_exe,
+            repo_root=repo_root,
+            codex_home=codex_home,
+            thread_id_file=thread_id_file,
+            logs_dir=logs_dir,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            web_search_mode=web_search_mode,
+            network_access_enabled=network_access_enabled,
+            sandbox_mode=sandbox_mode,
+            skip_git_repo_check=skip_git_repo_check,
+            add_dirs=add_dirs,
+            prompt=prompt,
+            env=env,
+        )
+        telemetry = result.setdefault("telemetry", {})
+        telemetry["thread_reset_retry"] = True
+        telemetry["thread_reset_reason"] = "context_length_exceeded"
+        telemetry["previous_thread_id"] = previous_thread_id
+        return result
+
+
 def which_codex() -> str:
     if os.name == "nt":
         cmd = shutil.which("codex.cmd")
@@ -2275,7 +2370,7 @@ def main() -> int:
 
         cycle_started = utc_now()
         try:
-            codex_result = call_codex(
+            codex_result = call_codex_with_fresh_thread_retry(
                 codex_exe=codex_cmd,
                 repo_root=repo_root,
                 codex_home=codex_home,

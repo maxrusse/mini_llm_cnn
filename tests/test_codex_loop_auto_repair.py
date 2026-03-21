@@ -71,6 +71,87 @@ class AutoRepairHelpersTests(unittest.TestCase):
         )
         self.assertEqual(tiers, ["medium", "long"])
 
+    def test_is_context_overflow_error_detects_codex_overflow(self) -> None:
+        self.assertTrue(codex_loop.is_context_overflow_error("context_length_exceeded"))
+        self.assertTrue(
+            codex_loop.is_context_overflow_error(
+                "Your input exceeds the context window of this model. Please adjust your input and try again."
+            )
+        )
+        self.assertFalse(codex_loop.is_context_overflow_error("network timeout"))
+
+    def test_reset_codex_thread_state_clears_file_and_logs_reason(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "thread_reset_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            logs_dir = tmp_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            thread_id_file = tmp_dir / "thread_id.txt"
+            thread_id_file.write_text("thread-123", encoding="utf-8")
+
+            previous = codex_loop.reset_codex_thread_state(
+                thread_id_file=thread_id_file,
+                logs_dir=logs_dir,
+                reason="context_length_exceeded",
+            )
+
+            self.assertEqual(previous, "thread-123")
+            self.assertFalse(thread_id_file.exists())
+            log_text = (logs_dir / "codex_thread_reset.log").read_text(encoding="utf-8")
+            self.assertIn("context_length_exceeded", log_text)
+            self.assertIn("thread-123", log_text)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_call_codex_with_fresh_thread_retry_resets_and_retries_once(self) -> None:
+        tmp_root = REPO_ROOT / ".mini_loop" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = tmp_root / "fresh_thread_retry_case"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            logs_dir = tmp_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            thread_id_file = tmp_dir / "thread_id.txt"
+            thread_id_file.write_text("thread-xyz", encoding="utf-8")
+
+            with mock.patch.object(
+                codex_loop,
+                "call_codex",
+                side_effect=[
+                    RuntimeError("codex runner failed: context_length_exceeded"),
+                    {"returncode": 0, "thread_id": "fresh-thread", "action_payload": {"action": "done"}, "telemetry": {}},
+                ],
+            ) as mocked_call:
+                result = codex_loop.call_codex_with_fresh_thread_retry(
+                    codex_exe="codex",
+                    repo_root=tmp_dir,
+                    codex_home=tmp_dir / "codex_home",
+                    thread_id_file=thread_id_file,
+                    logs_dir=logs_dir,
+                    model="gpt-5.3-codex-spark",
+                    reasoning_effort="high",
+                    web_search_mode="live",
+                    network_access_enabled=True,
+                    sandbox_mode="workspace-write",
+                    skip_git_repo_check=False,
+                    add_dirs=[],
+                    prompt="prompt",
+                    env={},
+                )
+
+            self.assertEqual(mocked_call.call_count, 2)
+            self.assertEqual(result["thread_id"], "fresh-thread")
+            self.assertTrue(result["telemetry"]["thread_reset_retry"])
+            self.assertEqual(result["telemetry"]["thread_reset_reason"], "context_length_exceeded")
+            self.assertEqual(result["telemetry"]["previous_thread_id"], "thread-xyz")
+            self.assertFalse(thread_id_file.exists())
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def test_recent_cycles_without_web_search_counts_tail(self) -> None:
         cycles = [
             {"telemetry": {"used_web_search": True}},

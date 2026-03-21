@@ -21,6 +21,7 @@ This repo is an autonomous config-only research loop for `xray_fracture_benchmar
 - Longer programming work is allowed when it is the most feasible route to a strong experiment. The loop does not need to restrict itself to only tiny edits if a larger bounded implementation is what the hypothesis requires.
 - You may request narrowly scoped package installs into `xray_fracture_benchmark_venv` and downloads of pretrained weights or papers if they are directly tied to a concrete experiment path.
 - The wrapper may auto-repair one failed `run_config` cycle by installing mapped packages or retrying once with a configured model-name fallback.
+- If the remote Codex thread fails with a context overflow, the wrapper may clear the saved thread id and retry once on a fresh thread while preserving local ledgers and artifacts.
 - Recoverable crashes are valid work items. If a promising direction fails because of a missing package, unsupported config surface, or benchmark-side implementation gap, prefer repairing it over treating the crash as evidence that the idea is bad.
 - The wrapper runs benchmark commands with repo-local cache and temp directories under `.mini_loop/` so pretrained weights and transient files stay inside the workspace when possible.
 
@@ -85,3 +86,4 @@ Integrate transdomain knowledge when useful: if another domain has a method that
 5. Review the next cycle's result summary and continue until manually stopped.
 6. If a run crashes because of a missing module, unsupported model/config surface, or another bounded implementation gap, prefer a repair path such as `install_package`, `download_file`, or `run_config.code_edits` before abandoning the direction.
 7. If the wrapper rejects a proposal as a plateau micro-tweak, use that rejection to broaden the next proposal rather than stopping the session.
+8. If the wrapper had to rotate to a fresh Codex thread after context overflow, continue from the local experiment state instead of re-deriving history from memory.
